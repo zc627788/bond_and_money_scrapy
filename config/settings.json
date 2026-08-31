@@ -1,0 +1,23 @@
+{
+  "delay_seconds": 1.4,
+  "max_retries": 5,
+  "download_dir": "downloads",
+  "output_dir": "output",
+  "chinamoney": {
+    "page_size": 15,
+    "start_date": "2006-08-01",
+    "categories": [
+      {"code": "bond", "scnd": "1104", "channel_path": "zxpjbg", "label": "债项评级报告"},
+      {"code": "issuer", "scnd": "1105", "channel_path": "ztpjbg", "label": "主体评级报告"},
+      {"code": "watch", "scnd": "1103", "channel_path": "zdgz", "label": "重点关注"}
+    ]
+  },
+  "chinabond": {
+    "page_size": 20,
+    "start_date": "2006-01-01",
+    "parent_chnl_name": "fxyfxdh_zqzl",
+    "child_chnl_desc": "评级文件",
+    "exclude_parent_chnl_names": ["zkzl_dfzxxpl", "zkzl_lsz"],
+    "jrzq_chnl_name": ",pjbg_zxpj,pjbg_zxpj_zcxjrzq,pjbg_zxpj_syyhptjrzq,pjbg_zxpj_wgdqxzbzq,pjbg_zxpj_ejzbzq,pjbg_zxpj_bxgszbbczq,pjbg_zxpj_fyhjrzq,pjbg_zxpj_qtzjzq,pjbg_zdgz,pjbg_zdgz_zcxjrzq,pjbg_zdgz_syyhpyjrzq,pjbg_zdgz_wgdqxzbzq,pjbg_zdgz_ejzbzq,pjbg_zdgz_bxgszbbczq,pjbg_zdgz_fyhjrzq,pjbg_zdgz_qtjrzq,pjbg_ztpj"
+  }
+}

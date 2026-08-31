@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.idea/
+.vscode/
+
+# probe leftovers
+_probe/
+_probe_*.py
+
+# runtime output
+downloads/
+output/
+*.log
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
