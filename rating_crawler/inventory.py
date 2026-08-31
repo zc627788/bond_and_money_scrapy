@@ -54,6 +54,9 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
 def write_tables(rows: list[dict[str, Any]], out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows, columns=COLUMNS) if rows else empty_frame()
+    for col in ("content_id", "doc_id", "duplicate_of", "local_path", "pdf_url", "detail_url"):
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str).replace({"nan": "", "None": ""})
     csv_path = out_dir / "inventory.csv"
     xlsx_path = out_dir / "inventory.xlsx"
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
@@ -70,6 +73,7 @@ def write_tables(rows: list[dict[str, Any]], out_dir: Path) -> None:
 
 def mark_duplicates(rows: list[dict[str, Any]]) -> None:
     by_hash: dict[str, str] = {}
+    agency_by_hash: dict[str, str] = {}
     for row in rows:
         digest = row.get("sha256") or ""
         if not digest or row.get("status") != "ok":
@@ -77,5 +81,11 @@ def mark_duplicates(rows: list[dict[str, Any]]) -> None:
         if digest in by_hash:
             row["duplicate_of"] = by_hash[digest]
         else:
-            by_hash[digest] = row.get("content_id") or ""
+            by_hash[digest] = str(row.get("content_id") or "")
             row["duplicate_of"] = ""
+        if row.get("agency"):
+            agency_by_hash.setdefault(digest, row["agency"])
+    for row in rows:
+        digest = row.get("sha256") or ""
+        if digest in agency_by_hash and not row.get("agency"):
+            row["agency"] = agency_by_hash[digest]

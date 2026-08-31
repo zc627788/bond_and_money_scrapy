@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Optional
 from urllib.parse import unquote
 
@@ -99,17 +100,24 @@ class ChinaMoneyClient:
         self.ensure()
         channel_id = self.channels.get(channel_path, FALLBACK_CHANNELS.get(channel_path, ""))
         # Default window (~3y) is what the CDN reliably serves.
-        records = self._paged(issuer, scnd=scnd, channel_id=channel_id, start="", end="")
-        older = self._paged(
+        records = _keep_relevant(
             issuer,
-            scnd=scnd,
-            channel_id=channel_id,
-            start=self.start_date,
-            end=self.end_date,
-            retry_403=False,
+            self._paged(issuer, scnd=scnd, channel_id=channel_id, start="", end=""),
+            label,
         )
-        if older:
-            records = older + records
+        older = _keep_relevant(
+            issuer,
+            self._paged(
+                issuer,
+                scnd=scnd,
+                channel_id=channel_id,
+                start=self.start_date,
+                end=self.end_date,
+                retry_403=False,
+            ),
+            label,
+        )
+        records = older + records
         out = []
         seen: set[str] = set()
         for rec in records:
@@ -168,7 +176,7 @@ class ChinaMoneyClient:
             }
             self.http.sleep()
             resp = self.http.post(
-                LIST_API,
+                f"{LIST_API}?_={int(time.time() * 1000)}",
                 data=payload,
                 headers=_headers("application/json, text/javascript, */*; q=0.01"),
                 warmup=self.warmup,
@@ -218,6 +226,18 @@ class ChinaMoneyClient:
         if not is_pdf(data) and (item.get("suffix") == "pdf"):
             raise RuntimeError(f"not a pdf ({resp.headers.get('content-type')}) {url}")
         return data, filename
+
+
+def _keep_relevant(issuer: str, records: list[dict[str, Any]], label: str) -> list[dict[str, Any]]:
+    """Drop the site's 'latest reports' fallback when keyword search missed."""
+    if not records:
+        return []
+    hit = any(issuer in (r.get("title") or "") for r in records)
+    if label == "债项评级报告":
+        return records if hit else []
+    if not hit:
+        return []
+    return [r for r in records if issuer in (r.get("title") or "")]
 
 
 def _filename_from_cd(cd: str) -> str:

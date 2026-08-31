@@ -40,10 +40,10 @@ python -m pip install -r requirements.txt
 
 ## 用法
 
-单个企业（先用临泉县验证）：
+单个企业（先用临泉县验证，`-u` 避免 Windows 下日志缓冲）：
 
 ```powershell
-python main.py --issuer 临泉县交通建设投资有限责任公司
+python -u main.py --issuer 临泉县交通建设投资有限责任公司
 ```
 
 从 Excel 跑前 5 家：

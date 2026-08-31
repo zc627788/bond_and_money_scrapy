@@ -12,6 +12,10 @@ from .inventory import append_jsonl, load_jsonl, mark_duplicates, write_tables
 from .util import guess_ext, is_pdf, issuer_dirname, sanitize_filename, sha256_bytes, sha256_file
 
 
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+
 class Crawler:
     def __init__(self, settings: dict[str, Any], root: Path):
         self.settings = settings
@@ -65,9 +69,9 @@ class Crawler:
         done = set(state.get("done") or [])
         for seq, name in issuers:
             if name in done:
-                print(f"[skip] {seq} {name} already done")
+                log(f"[skip] {seq} {name} already done")
                 continue
-            print(f"\n===== [{seq}] {name} =====")
+            log(f"\n===== [{seq}] {name} =====")
             try:
                 self._run_one(seq, name, sources=sources, download=download)
                 done.add(name)
@@ -76,34 +80,34 @@ class Crawler:
                     del state["failed"][name]
                 self.save_state(state)
             except Exception as e:
-                print(f"  [fail] {name}: {type(e).__name__}: {e}")
+                log(f"  [fail] {name}: {type(e).__name__}: {e}")
                 state.setdefault("failed", {})[name] = f"{type(e).__name__}: {e}"
                 self.save_state(state)
             self._flush_tables()
         self._flush_tables()
-        print("\n完成。清单:", self.output_dir / "inventory.xlsx")
+        log(f"\n完成。清单: {self.output_dir / 'inventory.xlsx'}")
 
     def _run_one(self, seq: int, name: str, *, sources: tuple[str, ...], download: bool) -> None:
         items: list[dict[str, Any]] = []
         if "chinamoney" in sources:
             for cat in self.cm_categories:
-                print(f"  chinamoney {cat.get('label')} ...")
+                log(f"  chinamoney {cat.get('label')} ...")
                 rows = self.cm.search_category(
                     name,
                     scnd=str(cat["scnd"]),
                     channel_path=str(cat["channel_path"]),
                     label=str(cat["label"]),
                 )
-                print(f"    {len(rows)} 条")
+                log(f"    {len(rows)} 条")
                 items.extend(rows)
         if "chinabond" in sources:
-            print("  chinabond 评级文件 ...")
+            log("  chinabond 评级文件 ...")
             rows = self.cb.search(name)
-            print(f"    {len(rows)} 条")
+            log(f"    {len(rows)} 条")
             items.extend(rows)
 
         if not items:
-            print("  无记录")
+            log("  无记录")
             append_jsonl(
                 self.records_path,
                 {
@@ -130,7 +134,7 @@ class Crawler:
             else:
                 row["status"] = "listed"
             append_jsonl(self.records_path, row)
-            print(
+            log(
                 f"    [{row['status']}] {row['source']} {row['publish_date']} "
                 f"{row['agency']} {row['title'][:60]}"
             )
@@ -194,9 +198,25 @@ class Crawler:
 
     def _flush_tables(self) -> None:
         rows = load_jsonl(self.records_path)
+        rows = _drop_false_hits(rows)
         rows = _last_wins(rows)
         mark_duplicates(rows)
         write_tables(rows, self.output_dir)
+
+
+def _drop_false_hits(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """主体/重点关注若未命中发行人名称，多半是接口回落成最新列表。"""
+    kept = []
+    for row in rows:
+        issuer = row.get("issuer_name") or ""
+        title = row.get("title") or ""
+        cat = row.get("category") or ""
+        if row.get("status") == "empty" or not title:
+            kept.append(row)
+            continue
+        if issuer in title or cat == "债项评级报告":
+            kept.append(row)
+    return kept
 
 
 def _last_wins(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

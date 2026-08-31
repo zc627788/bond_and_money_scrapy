@@ -55,7 +55,7 @@ class BrowserSession:
                     if not retry_403 or attempt == self.max_retries:
                         return resp
                     wait = min(20.0, self.delay * (2 ** attempt) + random.uniform(0.3, 1.5))
-                    print(f"  [http] {resp.status_code} empty={len(resp.content)==0} {url} retry {attempt}/{self.max_retries} sleep {wait:.1f}s")
+                    print(f"  [http] {resp.status_code} empty={len(resp.content)==0} {url} retry {attempt}/{self.max_retries} sleep {wait:.1f}s", flush=True)
                     self._rebuild()
                     if warmup is not None:
                         warmup(self)
@@ -63,14 +63,14 @@ class BrowserSession:
                     continue
                 if resp.status_code >= 500:
                     wait = min(15.0, self.delay * attempt + random.uniform(0.2, 1.0))
-                    print(f"  [http] {resp.status_code} {url} retry {attempt}/{self.max_retries} sleep {wait:.1f}s")
+                    print(f"  [http] {resp.status_code} {url} retry {attempt}/{self.max_retries} sleep {wait:.1f}s", flush=True)
                     time.sleep(wait)
                     continue
                 return resp
             except Exception as e:
                 last_exc = e
                 wait = min(15.0, self.delay * attempt + random.uniform(0.2, 1.0))
-                print(f"  [http] {type(e).__name__}: {e} retry {attempt}/{self.max_retries} sleep {wait:.1f}s")
+                print(f"  [http] {type(e).__name__}: {e} retry {attempt}/{self.max_retries} sleep {wait:.1f}s", flush=True)
                 self._rebuild()
                 if warmup is not None:
                     try:

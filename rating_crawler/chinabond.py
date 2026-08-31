@@ -205,5 +205,7 @@ def _parse_appendix(raw: str) -> list[tuple[str, str, str]]:
         fid = parts[0].strip()
         file_name = parts[1].strip()
         display = parts[2].strip() if len(parts) > 2 else file_name
+        if display.lower().endswith(".pdf"):
+            display = display[:-4]
         out.append((fid, file_name, display))
     return out
