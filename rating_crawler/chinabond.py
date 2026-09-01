@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 from urllib.parse import urljoin
 
 from .http import UA, BrowserSession
@@ -28,8 +28,8 @@ class ChinaBondClient:
         self,
         http: BrowserSession,
         *,
-        page_size: int = 20,
-        start_date: str = "2006-01-01",
+        page_size: int = 50,
+        start_date: str = "1990-01-01",
         parent_chnl_name: str = "fxyfxdh_zqzl",
         child_chnl_desc: str = "评级文件",
         exclude_parent_chnl_names: Optional[list[str]] = None,
@@ -53,17 +53,17 @@ class ChinaBondClient:
             retry_403=False,
         )
         self._ready = True
+        sess.mark_warm()
 
     def ensure(self) -> None:
-        if not self._ready:
+        if not self.http.is_warm():
             self.warmup()
+        self._ready = True
 
-    def search(self, issuer: str) -> list[dict[str, Any]]:
+    def iter_pages(self, issuer: str, start_page: int = 1) -> Iterator[dict[str, Any]]:
         self.ensure()
-        items: list[dict[str, Any]] = []
-        page = 1
-        total_pages = 1
-        while page <= total_pages:
+        page = max(1, start_page)
+        while True:
             payload = {
                 "parentChnlName": self.parent_chnl_name,
                 "excludeParentChnlNames": self.exclude_parent_chnl_names,
@@ -93,29 +93,23 @@ class ChinaBondClient:
                 warmup=self.warmup,
             )
             if resp.status_code != 200 or not resp.content:
-                print(f"  [chinabond] list fail status={resp.status_code} page={page}")
-                break
-            try:
-                body = resp.json()
-            except Exception:
-                print(f"  [chinabond] non-json page={page}: {resp.content[:120]!r}")
-                break
+                raise RuntimeError(f"chinabond list {resp.status_code} page={page}")
+            body = resp.json()
             if not body.get("success"):
-                print(f"  [chinabond] api error code={body.get('code')} msg={body.get('msg')}")
-                break
+                raise RuntimeError(f"chinabond api {body.get('code')} {body.get('msg')}")
             data = body.get("data") or {}
             rows = data.get("list") or []
             total = int(data.get("total") or 0)
-            total_pages = max(1, (total + self.page_size - 1) // self.page_size)
+            pages = max(1, (total + self.page_size - 1) // self.page_size) if total else 1
+            items = []
             for row in rows:
                 items.extend(self._row_to_items(issuer, row))
-            if not rows:
+            yield {"page": page, "pages": pages, "total": total, "items": items}
+            if not rows or page >= pages:
                 break
             page += 1
             if page > 80:
-                print("  [chinabond] page cap reached")
                 break
-        return items
 
     def _row_to_items(self, issuer: str, row: dict[str, Any]) -> list[dict[str, Any]]:
         title = row.get("docTitle") or ""
@@ -124,6 +118,23 @@ class ChinaBondClient:
         doc_id = str(row.get("docid") or row.get("originDocId") or "")
         locked = bool(row.get("quanXianMa"))
         appendices = _parse_appendix(row.get("appendixIds") or "")
+        if locked:
+            return [
+                {
+                    "source": "chinabond",
+                    "category": "评级文件",
+                    "issuer_name": issuer,
+                    "title": title,
+                    "agency": guess_agency(title),
+                    "publish_date": date_s,
+                    "content_id": doc_id,
+                    "doc_id": doc_id,
+                    "suffix": "pdf",
+                    "detail_url": pub,
+                    "pdf_url": "",
+                    "locked": True,
+                }
+            ]
         if not appendices:
             return [
                 {
@@ -138,8 +149,7 @@ class ChinaBondClient:
                     "suffix": "",
                     "detail_url": pub,
                     "pdf_url": "",
-                    "locked": locked,
-                    "raw": row,
+                    "locked": False,
                 }
             ]
         out = []
@@ -160,8 +170,7 @@ class ChinaBondClient:
                     "suffix": (file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "pdf"),
                     "detail_url": pub,
                     "pdf_url": pdf_url,
-                    "locked": locked,
-                    "raw": row,
+                    "locked": False,
                     "appendix_index": idx,
                 }
             )
@@ -173,8 +182,7 @@ class ChinaBondClient:
         if not url:
             raise RuntimeError("no pdf url")
         if item.get("locked"):
-            raise RuntimeError("locked (quanXianMa)")
-        self.http.sleep(0.7)
+            raise RuntimeError("locked skipped")
         resp = self.http.get(
             url,
             headers={
@@ -194,7 +202,6 @@ class ChinaBondClient:
 
 
 def _parse_appendix(raw: str) -> list[tuple[str, str, str]]:
-    """appendixIds: id=filename.pdf=display.pdf * id2=..."""
     out: list[tuple[str, str, str]] = []
     if not raw:
         return out

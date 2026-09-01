@@ -1,11 +1,18 @@
 {
-  "delay_seconds": 1.4,
-  "max_retries": 5,
+  "delay_seconds": 0,
+  "max_retries": 4,
+  "workers": 12,
   "download_dir": "downloads",
   "output_dir": "output",
+  "proxy": {
+    "enabled": true,
+    "api": "http://58ip.top/api/get?token=9e5d4546c8092014354afd46897b1e&number=50&type=http&format=1",
+    "max_extract": 50,
+    "refresh_seconds": 180
+  },
   "chinamoney": {
     "page_size": 15,
-    "start_date": "2006-08-01",
+    "start_date": "1990-01-01",
     "categories": [
       {"code": "bond", "scnd": "1104", "channel_path": "zxpjbg", "label": "债项评级报告"},
       {"code": "issuer", "scnd": "1105", "channel_path": "ztpjbg", "label": "主体评级报告"},
@@ -13,8 +20,8 @@
     ]
   },
   "chinabond": {
-    "page_size": 20,
-    "start_date": "2006-01-01",
+    "page_size": 50,
+    "start_date": "1990-01-01",
     "parent_chnl_name": "fxyfxdh_zqzl",
     "child_chnl_desc": "评级文件",
     "exclude_parent_chnl_names": ["zkzl_dfzxxpl", "zkzl_lsz"],

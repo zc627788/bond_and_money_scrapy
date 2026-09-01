@@ -26,7 +26,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="抓取来源，默认双源",
     )
     p.add_argument("--no-download", action="store_true", help="只拉列表，不下载 PDF")
-    p.add_argument("--no-resume", action="store_true", help="忽略 output/state.json，重跑")
+    p.add_argument("--no-resume", action="store_true", help="忽略断点，重跑未完成任务")
+    p.add_argument("--workers", type=int, default=0, help="下载并发，默认读 config workers")
+    p.add_argument("--no-proxy", action="store_true", help="禁用动态代理")
     p.add_argument(
         "--config",
         default="config/settings.json",
@@ -70,6 +72,10 @@ def main(argv: list[str] | None = None) -> None:
         print(f"名单 {excel} 本轮 {len(issuers)} 家")
 
     sources = ("chinamoney", "chinabond") if args.source == "both" else (args.source,)
+    if args.workers:
+        settings["workers"] = args.workers
+    if args.no_proxy:
+        settings.setdefault("proxy", {})["enabled"] = False
     crawler = Crawler(settings, root)
     crawler.run(
         issuers,

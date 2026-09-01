@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import random
+import threading
 import time
 from typing import Any, Optional
 
 from curl_cffi import requests as creq
+
+from .proxy import ProxyPool
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -16,25 +19,44 @@ IMPERSONATE = "chrome131"
 
 
 class BrowserSession:
-    """curl_cffi session with Chrome TLS impersonation, 403 backoff, delay."""
-
-    def __init__(self, delay: float = 1.4, max_retries: int = 5):
-        self.delay = delay
+    def __init__(
+        self,
+        delay: float = 0.0,
+        max_retries: int = 4,
+        proxy_pool: Optional[ProxyPool] = None,
+    ):
+        self.delay = max(0.0, delay)
         self.max_retries = max_retries
-        self.session: Optional[creq.Session] = None
-        self._rebuild()
+        self.proxy_pool = proxy_pool
+        self._local = threading.local()
+
+    def _session(self) -> creq.Session:
+        sess = getattr(self._local, "session", None)
+        if sess is None:
+            sess = creq.Session(impersonate=IMPERSONATE)
+            self._local.session = sess
+        return sess
 
     def _rebuild(self) -> None:
-        if self.session is not None:
+        old = getattr(self._local, "session", None)
+        if old is not None:
             try:
-                self.session.close()
+                old.close()
             except Exception:
                 pass
-        self.session = creq.Session(impersonate=IMPERSONATE)
+        self._local.session = creq.Session(impersonate=IMPERSONATE)
+        self._local.warm = False
+
+    def mark_warm(self) -> None:
+        self._local.warm = True
+
+    def is_warm(self) -> bool:
+        return bool(getattr(self._local, "warm", False))
 
     def sleep(self, scale: float = 1.0) -> None:
-        base = max(0.4, self.delay * scale)
-        time.sleep(base + random.uniform(0, base * 0.45))
+        if self.delay <= 0:
+            return
+        time.sleep(self.delay * scale + random.uniform(0, self.delay * 0.2))
 
     def request(
         self,
@@ -44,40 +66,64 @@ class BrowserSession:
         headers: Optional[dict[str, str]] = None,
         warmup: Optional[Any] = None,
         retry_403: bool = True,
+        timeout: float = 12,
         **kwargs: Any,
     ) -> creq.Response:
         last_exc: Optional[Exception] = None
-        for attempt in range(1, self.max_retries + 1):
+        last_resp: Optional[creq.Response] = None
+        total_tries = self.max_retries + (1 if self.proxy_pool else 0)
+        for attempt in range(1, total_tries + 1):
+            use_proxy = bool(self.proxy_pool) and attempt <= self.max_retries
+            proxy = self.proxy_pool.acquire() if use_proxy else None
+            proxy_url = ProxyPool.as_url(proxy) if use_proxy else None
             try:
-                assert self.session is not None
-                resp = self.session.request(method, url, headers=headers, timeout=kwargs.pop("timeout", 45), **kwargs)
-                if resp.status_code in (403, 412) or (resp.status_code == 200 and not resp.content):
-                    if not retry_403 or attempt == self.max_retries:
+                extra = dict(kwargs)
+                if proxy_url:
+                    extra["proxy"] = proxy_url
+                resp = self._session().request(
+                    method,
+                    url,
+                    headers=headers,
+                    timeout=timeout,
+                    **extra,
+                )
+                last_resp = resp
+                bad = resp.status_code in (403, 407, 412, 429, 502, 503, 504) or (
+                    resp.status_code == 200 and not resp.content
+                )
+                if bad:
+                    if self.proxy_pool:
+                        self.proxy_pool.report_bad(proxy)
+                    if not retry_403 and resp.status_code in (403, 412):
                         return resp
-                    wait = min(20.0, self.delay * (2 ** attempt) + random.uniform(0.3, 1.5))
-                    print(f"  [http] {resp.status_code} empty={len(resp.content)==0} {url} retry {attempt}/{self.max_retries} sleep {wait:.1f}s", flush=True)
+                    if attempt == total_tries:
+                        return resp
                     self._rebuild()
                     if warmup is not None:
                         warmup(self)
-                    time.sleep(wait)
                     continue
                 if resp.status_code >= 500:
-                    wait = min(15.0, self.delay * attempt + random.uniform(0.2, 1.0))
-                    print(f"  [http] {resp.status_code} {url} retry {attempt}/{self.max_retries} sleep {wait:.1f}s", flush=True)
-                    time.sleep(wait)
+                    if self.proxy_pool and use_proxy:
+                        self.proxy_pool.report_bad(proxy)
+                    if attempt == total_tries:
+                        return resp
+                    self._rebuild()
                     continue
                 return resp
             except Exception as e:
                 last_exc = e
-                wait = min(15.0, self.delay * attempt + random.uniform(0.2, 1.0))
-                print(f"  [http] {type(e).__name__}: {e} retry {attempt}/{self.max_retries} sleep {wait:.1f}s", flush=True)
+                if self.proxy_pool and use_proxy:
+                    self.proxy_pool.report_bad(proxy)
                 self._rebuild()
                 if warmup is not None:
                     try:
                         warmup(self)
                     except Exception:
                         pass
-                time.sleep(wait)
+                if attempt == total_tries:
+                    break
+        if last_resp is not None:
+            return last_resp
         if last_exc:
             raise last_exc
         raise RuntimeError(f"request failed: {method} {url}")

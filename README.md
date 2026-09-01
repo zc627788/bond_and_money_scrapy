@@ -40,34 +40,28 @@ python -m pip install -r requirements.txt
 
 ## 用法
 
-单个企业（先用临泉县验证，`-u` 避免 Windows 下日志缓冲）：
+单个企业（`-u` 避免 Windows 下日志缓冲）：
 
 ```powershell
 python -u main.py --issuer 临泉县交通建设投资有限责任公司
 ```
 
-从 Excel 跑前 5 家：
+从 Excel 分批：
 
 ```powershell
-python main.py --excel A09_lgfv_issuer_name_only.xlsx --limit 5
+python -u main.py --excel A09_lgfv_issuer_name_only.xlsx --start 1 --limit 50
 ```
 
-从第 100 家起跑 20 家，只查中国债券信息网：
+断点在 `output/progress.json`：记录每家、每个栏目的接口总数、当前页、已列出/已下载条数。默认续跑。
 
 ```powershell
-python main.py --excel A09_lgfv_issuer_name_only.xlsx --start 100 --limit 20 --source chinabond
+python -u main.py --excel A09_lgfv_issuer_name_only.xlsx
 ```
 
-只拉清单不下载：
+关掉代理或加大下载并发：
 
 ```powershell
-python main.py --issuer 临泉县交通建设投资有限责任公司 --no-download
-```
-
-断点续跑（默认读取 `output/state.json`）：
-
-```powershell
-python main.py --excel A09_lgfv_issuer_name_only.xlsx
+python -u main.py --issuer 临泉县交通建设投资有限责任公司 --no-proxy --workers 8
 ```
 
 ## 产出
@@ -86,6 +80,10 @@ output/
 
 同一份 PDF 在两边都会出现时，`inventory.xlsx` 的 `duplicate_of` 按 sha256 标记。
 
-## 频率
+## 速度与代理
 
-默认请求间隔约 1.4s，见 `config/settings.json`。全量 4152 家建议分批 `--start` / `--limit`，不要并行猛打。
+默认 `delay_seconds=0`，下载并发 `workers=12`。动态代理从 58ip 提取，**单次最多 50 条**，失效轮换，池空再提。日期窗口为 `1990-01-01` 至今（接口能接受的最早），一次查全量，不再拆 3 年窗口。
+
+需要登录的中债非公开稿只记 `locked`，不下载、不重试。
+
+重复：`is_duplicate=1`，`dup_reason` 为 `same_file`（sha256）或 `same_title_date`，`duplicate_of` 指向先出现的 content_id。两边文件都保留。
