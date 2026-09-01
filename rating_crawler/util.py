@@ -6,6 +6,7 @@ import json
 import re
 import unicodedata
 from datetime import date
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,18 @@ AGENCY_ALIASES = [
 
 def today_str() -> str:
     return date.today().isoformat()
+
+
+def app_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def bundled_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS"))
+    return app_root()
 
 
 def load_json(path: Path) -> dict[str, Any]:

@@ -32,6 +32,22 @@
 
 `common.js` 里有 AES-ECB（`rklnavQccKhKkyVV`），只用于登录态，公开信披列表不签名。
 
+## 桌面版（GitHub Release 的 exe）
+
+```powershell
+python -u gui_app.py
+```
+
+界面只有：导入 CSV（可先下载模板）或手动逗号输入、同时抓几家 / 同时下载几个、代理（默认已填，留空直连）、开始 / 暂停 / 继续、下载列表、查看明细。默认双源查全部（1990 至今）。断点仍走 `output/progress.json`。
+
+打 Windows 安装包：
+
+```powershell
+powershell -File scripts/build_exe.ps1
+```
+
+GitHub 上 **Publish a release** 会自动编译 `BondMoneyScrapy.exe` 挂到该 Release 供下载。本地也可在 Actions 里手动跑 `Release Windows exe`。
+
 ## 安装
 
 ```powershell

@@ -15,6 +15,11 @@ downloads/
 output/
 *.log
 
+# pack
+build/
+dist/
+*.spec
+
 # OS
 Thumbs.db
 Desktop.ini

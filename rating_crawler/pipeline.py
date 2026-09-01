@@ -20,9 +20,12 @@ def log(msg: str) -> None:
 
 
 class Crawler:
-    def __init__(self, settings: dict[str, Any], root: Path):
+    def __init__(self, settings: dict[str, Any], root: Path, hooks: Optional[dict] = None):
         self.settings = settings
         self.root = root
+        self.hooks = hooks or {}
+        self._pause = threading.Event()
+        self._pause.set()
         delay = float(settings.get("delay_seconds", 0))
         retries = int(settings.get("max_retries", 4))
         self.workers = max(1, int(settings.get("workers", 12)))
@@ -67,6 +70,28 @@ class Crawler:
         self._flush_lock = threading.Lock()
         self._index = self._load_index()
 
+    def log(self, msg: str) -> None:
+        print(msg, flush=True)
+        cb = self.hooks.get("log")
+        if cb:
+            cb(msg)
+
+    def pause(self) -> None:
+        self._pause.clear()
+        self.log("已暂停")
+
+    def resume(self) -> None:
+        self._pause.set()
+        self.log("继续")
+
+    def wait_if_paused(self) -> None:
+        self._pause.wait()
+
+    def _hook(self, name: str, payload: dict[str, Any]) -> None:
+        cb = self.hooks.get(name)
+        if cb:
+            cb(payload)
+
     def _load_index(self) -> dict[str, dict[str, Any]]:
         idx: dict[str, dict[str, Any]] = {}
         for row in load_jsonl(self.records_path):
@@ -94,24 +119,26 @@ class Crawler:
         todo = []
         for seq, name in issuers:
             if resume and self.progress.is_done(name):
-                log(f"[skip] {seq} {name} already done")
+                self.log(f"[skip] {seq} {name} already done")
                 continue
             todo.append((seq, name))
         n = max(1, min(self.issuer_workers, len(todo) or 1))
-        log(f"公司并发 {n}，每家下载线程 {self.workers}（代理池共享）")
+        self.log(f"公司并发 {n}，每家下载线程 {self.workers}（代理池共享）")
 
         def _one(pair: tuple[int, str]) -> None:
             seq, name = pair
-            log(f"\n===== [{seq}] {name} =====")
+            self.wait_if_paused()
+            self.log(f"\n===== [{seq}] {name} =====")
+            self._hook("issuer", {"seq": seq, "name": name, "phase": "start"})
             self.progress.issuer(name, seq)
             self.progress.mark_issuer(name, "running")
             try:
                 complete = self._run_one(seq, name, sources=sources, download=download)
                 self.progress.mark_issuer(name, "done" if complete else "failed")
                 if not complete:
-                    log(f"  [{seq}] 未全部完成，已写入断点，下次续跑")
+                    self.log(f"  [{seq}] 未全部完成，已写入断点，下次续跑")
             except Exception as e:
-                log(f"  [fail] {seq} {name}: {type(e).__name__}: {e}")
+                self.log(f"  [fail] {seq} {name}: {type(e).__name__}: {e}")
                 self.progress.mark_issuer(name, "failed")
             self._flush_tables()
 
@@ -126,8 +153,8 @@ class Crawler:
                 for fut in as_completed(futs):
                     fut.result()
         self._flush_tables()
-        log(f"\n完成。清单: {self.output_dir / 'chinamoney.csv'}  {self.output_dir / 'chinabond.csv'}")
-        log(f"断点: {self.output_dir / 'progress.json'}")
+        self.log(f"\n完成。清单: {self.output_dir / 'chinamoney.csv'}  {self.output_dir / 'chinabond.csv'}")
+        self.log(f"断点: {self.output_dir / 'progress.json'}")
 
     def _run_one(self, seq: int, name: str, *, sources: tuple[str, ...], download: bool) -> bool:
         pending: list[dict[str, Any]] = []
@@ -136,18 +163,18 @@ class Crawler:
                 try:
                     pending.extend(self._list_chinamoney(seq, name, cat))
                 except Exception as e:
-                    log(f"  chinamoney {cat.get('label')} 列表失败，稍后断点续: {type(e).__name__}: {e}")
+                    self.log(f"  chinamoney {cat.get('label')} 列表失败，稍后断点续: {type(e).__name__}: {e}")
         if "chinabond" in sources:
             try:
                 pending.extend(self._list_chinabond(seq, name))
             except Exception as e:
-                log(f"  chinabond 列表失败，稍后断点续: {type(e).__name__}: {e}")
+                self.log(f"  chinabond 列表失败，稍后断点续: {type(e).__name__}: {e}")
 
         if not pending:
             snap = self.progress.snapshot(name)
             already = any(j.get("listed") for j in (snap.get("jobs") or {}).values())
             if not already:
-                log("  无记录")
+                self.log("  无记录")
                 self._write_row(
                     {
                         "issuer_seq": seq,
@@ -178,10 +205,10 @@ class Crawler:
         job = self.progress.job(name, job_key)
         out: list[dict[str, Any]] = []
         if job.get("list_done"):
-            log(f"  chinamoney {label} 列表已完成 total={job.get('list_total')} listed={job.get('listed')}")
+            self.log(f"  chinamoney {label} 列表已完成 total={job.get('list_total')} listed={job.get('listed')}")
             return self._pending_from_index(name, "chinamoney", label)
         start_page = int(job.get("next_page") or 1)
-        log(f"  chinamoney {label} 从第 {start_page} 页 ...")
+        self.log(f"  chinamoney {label} 从第 {start_page} 页 ...")
         last_total = 0
         for pack in self.cm.iter_pages(
             name,
@@ -191,6 +218,7 @@ class Crawler:
             start_page=start_page,
             max_pages=self.max_pages,
         ):
+            self.wait_if_paused()
             added = 0
             for item in pack["items"]:
                 row = self._to_row(seq, name, item)
@@ -212,7 +240,7 @@ class Crawler:
                 pages=pack["pages"],
                 added=added,
             )
-            log(
+            self.log(
                 f"    页 {pack['page']}/{pack['pages']} 本页新 {added} 条，接口总数 {pack['total']}"
             )
         self.progress.mark_list_done(name, job_key, last_total)
@@ -223,12 +251,13 @@ class Crawler:
         job = self.progress.job(name, job_key)
         out: list[dict[str, Any]] = []
         if job.get("list_done"):
-            log(f"  chinabond 评级文件 列表已完成 total={job.get('list_total')} listed={job.get('listed')}")
+            self.log(f"  chinabond 评级文件 列表已完成 total={job.get('list_total')} listed={job.get('listed')}")
             return self._pending_from_index(name, "chinabond", "评级文件")
         start_page = int(job.get("next_page") or 1)
-        log(f"  chinabond 评级文件 从第 {start_page} 页 ...")
+        self.log(f"  chinabond 评级文件 从第 {start_page} 页 ...")
         last_total = 0
         for pack in self.cb.iter_pages(name, start_page=start_page, max_pages=self.max_pages):
+            self.wait_if_paused()
             added = 0
             for item in pack["items"]:
                 row = self._to_row(seq, name, item)
@@ -256,7 +285,7 @@ class Crawler:
                 pages=pack["pages"],
                 added=added,
             )
-            log(
+            self.log(
                 f"    页 {pack['page']}/{pack['pages']} 本页新 {added} 条，接口总数 {pack['total']}"
             )
         self.progress.mark_list_done(name, job_key, last_total)
@@ -316,9 +345,9 @@ class Crawler:
                 continue
             todo.append(item)
         if not todo:
-            log("  下载无可新文件")
+            self.log("  下载无可新文件")
             return
-        log(f"  下载 {len(todo)} 个文件 workers={self.workers}")
+        self.log(f"  下载 {len(todo)} 个文件 workers={self.workers}")
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
             futs = {pool.submit(self._download_one, name, item): item for item in todo}
             for fut in as_completed(futs):
@@ -327,13 +356,24 @@ class Crawler:
                     status = fut.result()
                 except Exception as e:
                     status = "fail"
-                    log(f"    [fail] {item.get('title')}: {e}")
-                log(f"    [{status}] {item.get('source')} {item.get('publish_date')} {str(item.get('title') or '')[:50]}")
+                    self.log(f"    [fail] {item.get('title')}: {e}")
+                self.log(f"    [{status}] {item.get('source')} {item.get('publish_date')} {str(item.get('title') or '')[:50]}")
 
     def _download_one(self, name: str, item: dict[str, Any]) -> str:
+        self.wait_if_paused()
         row = dict(item.get("_row") or self._to_row(0, name, item))
         dest = self._dest_path(row, item)
         job_key = _job_key(item)
+        task_id = str(item.get("content_id") or id(item))
+        self._hook(
+            "file_start",
+            {
+                "id": task_id,
+                "title": item.get("title") or "",
+                "source": item.get("source") or "",
+                "issuer": name,
+            },
+        )
         try:
             client = self.cm if item.get("source") == "chinamoney" else self.cb
             data, remote_name = client.download(item)
@@ -350,12 +390,14 @@ class Crawler:
                 row["error"] = "magic mismatch"
             self._write_row(row)
             self.progress.add_download(name, job_key, "download_ok" if row["status"] == "ok" else "download_fail")
+            self._hook("file_done", {"id": task_id, "status": row["status"], "path": row.get("local_path") or ""})
             return row["status"]
         except Exception as e:
             row["status"] = "fail"
             row["error"] = f"{type(e).__name__}: {e}"
             self._write_row(row)
             self.progress.add_download(name, job_key, "download_fail")
+            self._hook("file_done", {"id": task_id, "status": "fail", "path": ""})
             return "fail"
 
     def _to_row(self, seq: int, name: str, item: dict[str, Any]) -> dict[str, Any]:
