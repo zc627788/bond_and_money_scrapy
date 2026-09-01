@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from typing import Any, Iterator, Optional
 from urllib.parse import unquote
@@ -47,6 +48,7 @@ class ChinaMoneyClient:
         self.end_date = today_str()
         self.channels: dict[str, str] = dict(FALLBACK_CHANNELS)
         self._channels_loaded = False
+        self._ch_lock = threading.Lock()
 
     def warmup(self, http: Optional[BrowserSession] = None) -> None:
         sess = http or self.http
@@ -67,8 +69,10 @@ class ChinaMoneyClient:
         if not self.http.is_warm():
             self.warmup()
         if not self._channels_loaded:
-            self._load_channels()
-            self._channels_loaded = True
+            with self._ch_lock:
+                if not self._channels_loaded:
+                    self._load_channels()
+                    self._channels_loaded = True
 
     def _load_channels(self) -> None:
         resp = self.http.post(

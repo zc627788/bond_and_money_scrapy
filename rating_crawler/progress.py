@@ -39,13 +39,15 @@ class Progress:
             rec.setdefault("jobs", {})
 
     def is_done(self, issuer: str) -> bool:
-        return self.data.get("issuers", {}).get(issuer, {}).get("status") == "done"
+        with self._lock:
+            return self.data.get("issuers", {}).get(issuer, {}).get("status") == "done"
 
     def issuer(self, name: str, seq: int) -> dict[str, Any]:
-        rec = self.data["issuers"].setdefault(name, {"seq": seq, "status": "running", "jobs": {}})
-        rec.setdefault("jobs", {})
-        rec["seq"] = seq
-        return rec
+        with self._lock:
+            rec = self.data["issuers"].setdefault(name, {"seq": seq, "status": "running", "jobs": {}})
+            rec.setdefault("jobs", {})
+            rec["seq"] = seq
+            return rec
 
     def job(self, issuer: str, job_key: str) -> dict[str, Any]:
         rec = self.data["issuers"].setdefault(issuer, {"status": "running", "jobs": {}})

@@ -26,6 +26,7 @@ class Crawler:
         delay = float(settings.get("delay_seconds", 0))
         retries = int(settings.get("max_retries", 4))
         self.workers = max(1, int(settings.get("workers", 12)))
+        self.issuer_workers = max(1, int(settings.get("issuer_workers", 4)))
         self.max_pages = int(settings.get("max_pages") or 0)
         self.download_dir = root / settings.get("download_dir", "downloads")
         self.output_dir = root / settings.get("output_dir", "output")
@@ -63,6 +64,7 @@ class Crawler:
         self.cm_categories = cm.get("categories") or []
         self.progress = Progress(self.output_dir / "progress.json", self.output_dir / "state.json")
         self._jsonl_lock = threading.Lock()
+        self._flush_lock = threading.Lock()
         self._index = self._load_index()
 
     def _load_index(self) -> dict[str, dict[str, Any]]:
@@ -89,10 +91,17 @@ class Crawler:
         resume: bool = True,
     ) -> None:
         sources = tuple(sources)
+        todo = []
         for seq, name in issuers:
             if resume and self.progress.is_done(name):
                 log(f"[skip] {seq} {name} already done")
                 continue
+            todo.append((seq, name))
+        n = max(1, min(self.issuer_workers, len(todo) or 1))
+        log(f"公司并发 {n}，每家下载线程 {self.workers}（代理池共享）")
+
+        def _one(pair: tuple[int, str]) -> None:
+            seq, name = pair
             log(f"\n===== [{seq}] {name} =====")
             self.progress.issuer(name, seq)
             self.progress.mark_issuer(name, "running")
@@ -100,13 +109,24 @@ class Crawler:
                 complete = self._run_one(seq, name, sources=sources, download=download)
                 self.progress.mark_issuer(name, "done" if complete else "failed")
                 if not complete:
-                    log("  本家未全部完成，已写入断点，下次续跑")
+                    log(f"  [{seq}] 未全部完成，已写入断点，下次续跑")
             except Exception as e:
-                log(f"  [fail] {name}: {type(e).__name__}: {e}")
+                log(f"  [fail] {seq} {name}: {type(e).__name__}: {e}")
                 self.progress.mark_issuer(name, "failed")
             self._flush_tables()
+
+        if not todo:
+            self._flush_tables()
+        elif n == 1:
+            for pair in todo:
+                _one(pair)
+        else:
+            with ThreadPoolExecutor(max_workers=n) as pool:
+                futs = [pool.submit(_one, pair) for pair in todo]
+                for fut in as_completed(futs):
+                    fut.result()
         self._flush_tables()
-        log(f"\n完成。清单: {self.output_dir / 'inventory.xlsx'}")
+        log(f"\n完成。清单: {self.output_dir / 'chinamoney.csv'}  {self.output_dir / 'chinabond.csv'}")
         log(f"断点: {self.output_dir / 'progress.json'}")
 
     def _run_one(self, seq: int, name: str, *, sources: tuple[str, ...], download: bool) -> bool:
@@ -244,7 +264,9 @@ class Crawler:
 
     def _pending_from_index(self, name: str, source: str, category: str) -> list[dict[str, Any]]:
         out = []
-        for row in self._index.values():
+        with self._jsonl_lock:
+            snapshot = list(self._index.values())
+        for row in snapshot:
             if row.get("issuer_name") != name:
                 continue
             if row.get("source") != source or row.get("category") != category:
@@ -373,6 +395,10 @@ class Crawler:
         return issuer_dir / f"{date_s}_{agency}_{title}_{cid}.{ext}"
 
     def _flush_tables(self) -> None:
+        with self._flush_lock:
+            self._flush_tables_unlocked()
+
+    def _flush_tables_unlocked(self) -> None:
         rows = load_jsonl(self.records_path)
         rows = _drop_false_hits(rows)
         rows = _last_wins(rows)

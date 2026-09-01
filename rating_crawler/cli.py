@@ -27,7 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--no-download", action="store_true", help="只拉列表，不下载 PDF")
     p.add_argument("--no-resume", action="store_true", help="忽略断点，重跑未完成任务")
-    p.add_argument("--workers", type=int, default=0, help="下载并发，默认读 config workers")
+    p.add_argument("--workers", type=int, default=0, help="每家公司下载线程数，默认读 config workers")
+    p.add_argument("--issuer-workers", type=int, default=0, help="同时爬几家公司，默认读 config issuer_workers")
     p.add_argument("--max-pages", type=int, default=0, help="每个栏目最多翻几页，0 表示不限制")
     p.add_argument("--no-proxy", action="store_true", help="禁用动态代理")
     p.add_argument(
@@ -75,6 +76,8 @@ def main(argv: list[str] | None = None) -> None:
     sources = ("chinamoney", "chinabond") if args.source == "both" else (args.source,)
     if args.workers:
         settings["workers"] = args.workers
+    if args.issuer_workers:
+        settings["issuer_workers"] = args.issuer_workers
     if args.no_proxy:
         settings.setdefault("proxy", {})["enabled"] = False
     if args.max_pages:
