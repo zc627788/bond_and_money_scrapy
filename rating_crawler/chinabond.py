@@ -60,7 +60,7 @@ class ChinaBondClient:
             self.warmup()
         self._ready = True
 
-    def iter_pages(self, issuer: str, start_page: int = 1) -> Iterator[dict[str, Any]]:
+    def iter_pages(self, issuer: str, start_page: int = 1, max_pages: int = 0) -> Iterator[dict[str, Any]]:
         self.ensure()
         page = max(1, start_page)
         while True:
@@ -105,7 +105,7 @@ class ChinaBondClient:
             for row in rows:
                 items.extend(self._row_to_items(issuer, row))
             yield {"page": page, "pages": pages, "total": total, "items": items}
-            if not rows or page >= pages:
+            if not rows or page >= pages or (max_pages and page >= max_pages):
                 break
             page += 1
             if page > 80:
@@ -192,6 +192,7 @@ class ChinaBondClient:
                 "Referer": item.get("detail_url") or HOME,
             },
             warmup=self.warmup,
+            timeout=90,
         )
         data = resp.content or b""
         if resp.status_code != 200 or not data:

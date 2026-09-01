@@ -95,6 +95,7 @@ class ChinaMoneyClient:
         channel_path: str,
         label: str,
         start_page: int = 1,
+        max_pages: int = 0,
     ) -> Iterator[dict[str, Any]]:
         self.ensure()
         channel_id = self.channels.get(channel_path, FALLBACK_CHANNELS.get(channel_path, ""))
@@ -132,8 +133,9 @@ class ChinaMoneyClient:
             except (TypeError, ValueError):
                 pages = 1
             items = _records_to_items(issuer, _keep_relevant(issuer, rows, label), label)
+            cap = max_pages if max_pages else pages
             yield {"page": page, "pages": pages, "total": total, "items": items}
-            if not rows or page >= pages:
+            if not rows or page >= pages or (max_pages and page >= max_pages):
                 break
             page += 1
             if page > 80:
@@ -151,6 +153,7 @@ class ChinaMoneyClient:
                 "Referer": HOME,
             },
             warmup=self.warmup,
+            timeout=90,
         )
         data = resp.content or b""
         filename = _filename_from_cd(resp.headers.get("content-disposition", "")) or ""

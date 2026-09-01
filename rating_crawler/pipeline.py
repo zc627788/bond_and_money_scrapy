@@ -26,6 +26,7 @@ class Crawler:
         delay = float(settings.get("delay_seconds", 0))
         retries = int(settings.get("max_retries", 4))
         self.workers = max(1, int(settings.get("workers", 12)))
+        self.max_pages = int(settings.get("max_pages") or 0)
         self.download_dir = root / settings.get("download_dir", "downloads")
         self.output_dir = root / settings.get("output_dir", "output")
         self.records_path = self.output_dir / "records.jsonl"
@@ -168,6 +169,7 @@ class Crawler:
             channel_path=str(cat["channel_path"]),
             label=label,
             start_page=start_page,
+            max_pages=self.max_pages,
         ):
             added = 0
             for item in pack["items"]:
@@ -206,7 +208,7 @@ class Crawler:
         start_page = int(job.get("next_page") or 1)
         log(f"  chinabond 评级文件 从第 {start_page} 页 ...")
         last_total = 0
-        for pack in self.cb.iter_pages(name, start_page=start_page):
+        for pack in self.cb.iter_pages(name, start_page=start_page, max_pages=self.max_pages):
             added = 0
             for item in pack["items"]:
                 row = self._to_row(seq, name, item)
@@ -347,6 +349,8 @@ class Crawler:
             "doc_id": item.get("doc_id", ""),
             "detail_url": item.get("detail_url", ""),
             "pdf_url": item.get("pdf_url", ""),
+            "query_start": self.cb.start_date if item.get("source") == "chinabond" else self.cm.start_date,
+            "query_end": self.cb.end_date if item.get("source") == "chinabond" else self.cm.end_date,
             "local_path": "",
             "file_size": 0,
             "sha256": "",
@@ -354,7 +358,6 @@ class Crawler:
             "error": "",
             "is_duplicate": "0",
             "duplicate_of": "",
-            "duplicate_group": "",
             "dup_reason": "",
         }
 
@@ -374,7 +377,12 @@ class Crawler:
         rows = _drop_false_hits(rows)
         rows = _last_wins(rows)
         mark_duplicates(rows)
-        write_tables(rows, self.output_dir)
+        write_tables(
+            rows,
+            self.output_dir,
+            query_start=self.cm.start_date,
+            query_end=self.cm.end_date,
+        )
 
 
 def _row_relevant(issuer: str, row: dict[str, Any]) -> bool:

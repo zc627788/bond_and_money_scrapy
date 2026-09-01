@@ -76,6 +76,7 @@ class BrowserSession:
             use_proxy = bool(self.proxy_pool) and attempt <= self.max_retries
             proxy = self.proxy_pool.acquire() if use_proxy else None
             proxy_url = ProxyPool.as_url(proxy) if use_proxy else None
+            via = f"proxy {proxy}" if proxy_url else "direct"
             try:
                 extra = dict(kwargs)
                 if proxy_url:
@@ -92,7 +93,8 @@ class BrowserSession:
                     resp.status_code == 200 and not resp.content
                 )
                 if bad:
-                    if self.proxy_pool:
+                    print(f"  [http] {attempt}/{total_tries} {via} status={resp.status_code} 换IP重试", flush=True)
+                    if self.proxy_pool and use_proxy:
                         self.proxy_pool.report_bad(proxy)
                     if not retry_403 and resp.status_code in (403, 412):
                         return resp
@@ -103,6 +105,7 @@ class BrowserSession:
                         warmup(self)
                     continue
                 if resp.status_code >= 500:
+                    print(f"  [http] {attempt}/{total_tries} {via} status={resp.status_code} 换IP重试", flush=True)
                     if self.proxy_pool and use_proxy:
                         self.proxy_pool.report_bad(proxy)
                     if attempt == total_tries:
@@ -112,6 +115,7 @@ class BrowserSession:
                 return resp
             except Exception as e:
                 last_exc = e
+                print(f"  [http] {attempt}/{total_tries} {via} {type(e).__name__}: {e}", flush=True)
                 if self.proxy_pool and use_proxy:
                     self.proxy_pool.report_bad(proxy)
                 self._rebuild()
@@ -126,7 +130,7 @@ class BrowserSession:
             return last_resp
         if last_exc:
             raise last_exc
-        raise RuntimeError(f"request failed: {method} {url}")
+        raise RuntimeError(f"request failed after {total_tries} tries: {method} {url}")
 
     def get(self, url: str, **kwargs: Any) -> creq.Response:
         return self.request("GET", url, **kwargs)

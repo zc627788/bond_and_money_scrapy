@@ -28,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-download", action="store_true", help="只拉列表，不下载 PDF")
     p.add_argument("--no-resume", action="store_true", help="忽略断点，重跑未完成任务")
     p.add_argument("--workers", type=int, default=0, help="下载并发，默认读 config workers")
+    p.add_argument("--max-pages", type=int, default=0, help="每个栏目最多翻几页，0 表示不限制")
     p.add_argument("--no-proxy", action="store_true", help="禁用动态代理")
     p.add_argument(
         "--config",
@@ -76,6 +77,8 @@ def main(argv: list[str] | None = None) -> None:
         settings["workers"] = args.workers
     if args.no_proxy:
         settings.setdefault("proxy", {})["enabled"] = False
+    if args.max_pages:
+        settings["max_pages"] = args.max_pages
     crawler = Crawler(settings, root)
     crawler.run(
         issuers,
