@@ -183,6 +183,7 @@ class Crawler:
                         "status": "empty",
                     }
                 )
+            self._hook("listed", {"issuer": name, "total": 0, "done": 0})
             return self._lists_complete(name, sources)
 
         if download:
@@ -322,6 +323,7 @@ class Crawler:
 
     def _download_many(self, name: str, items: list[dict[str, Any]]) -> None:
         todo = []
+        already = 0
         for item in items:
             row = item.get("_row") or {}
             if not _row_relevant(name, row if row.get("title") else item):
@@ -333,6 +335,7 @@ class Crawler:
             if row.get("status") == "ok" and row.get("local_path"):
                 dest = self.root / row["local_path"]
                 if dest.exists() and dest.stat().st_size > 1000:
+                    already += 1
                     continue
             dest = self._dest_path(row if row.get("issuer_name") else self._to_row(0, name, item), item)
             if dest.exists() and dest.stat().st_size > 1000:
@@ -342,8 +345,10 @@ class Crawler:
                 row["status"] = "ok"
                 self._write_row(row)
                 self.progress.add_download(name, _job_key(item), "download_skip")
+                already += 1
                 continue
             todo.append(item)
+        self._hook("listed", {"issuer": name, "total": already + len(todo), "done": already})
         if not todo:
             self.log("  下载无可新文件")
             return
@@ -390,14 +395,22 @@ class Crawler:
                 row["error"] = "magic mismatch"
             self._write_row(row)
             self.progress.add_download(name, job_key, "download_ok" if row["status"] == "ok" else "download_fail")
-            self._hook("file_done", {"id": task_id, "status": row["status"], "path": row.get("local_path") or ""})
+            self._hook(
+                "file_done",
+                {
+                    "id": task_id,
+                    "status": row["status"],
+                    "path": row.get("local_path") or "",
+                    "issuer": name,
+                },
+            )
             return row["status"]
         except Exception as e:
             row["status"] = "fail"
             row["error"] = f"{type(e).__name__}: {e}"
             self._write_row(row)
             self.progress.add_download(name, job_key, "download_fail")
-            self._hook("file_done", {"id": task_id, "status": "fail", "path": ""})
+            self._hook("file_done", {"id": task_id, "status": "fail", "path": "", "issuer": name})
             return "fail"
 
     def _to_row(self, seq: int, name: str, item: dict[str, Any]) -> dict[str, Any]:
