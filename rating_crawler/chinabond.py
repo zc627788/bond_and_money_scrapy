@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import re
 from typing import Any, Iterator, Optional
 from urllib.parse import urljoin
 
@@ -9,6 +10,8 @@ from .util import guess_agency, is_pdf, today_str
 
 HOME = "https://www.chinabond.com.cn/xxpl/ywzc_fxyfxdh/fxyfxdh_zqzl/"
 LIST_API = "https://www.chinabond.com.cn/cbiw/trs/getContentByConditions"
+# ERR_E_Y_CK_CBIW_0001：括号等符号会被接口拒掉，只留中文/字母/数字/空格。
+_KW_KEEP = re.compile(r"[^\w\s]+", re.UNICODE)
 
 
 def _headers(accept: str, referer: str = HOME) -> dict[str, str]:
@@ -74,7 +77,7 @@ class ChinaBondClient:
                 "pageSize": self.page_size,
                 "pageNum": page,
                 "queryParam": {
-                    "keywords": issuer,
+                    "keywords": _search_keywords(issuer),
                     "startDate": self.start_date,
                     "endDate": self.end_date,
                     "reportType": "",
@@ -201,6 +204,11 @@ class ChinaBondClient:
         if item.get("suffix") == "pdf" and not is_pdf(data):
             raise RuntimeError(f"not a pdf ({resp.headers.get('content-type')}) {url}")
         return data, item.get("title") or ""
+
+
+def _search_keywords(issuer: str) -> str:
+    text = _KW_KEEP.sub("", issuer or "")
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _parse_appendix(raw: str) -> list[tuple[str, str, str]]:
