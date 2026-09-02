@@ -4,7 +4,6 @@ from __future__ import annotations
 import re
 import threading
 import time
-from collections import deque
 from typing import Optional
 
 from curl_cffi import requests as creq
@@ -13,81 +12,77 @@ IP_PORT = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}$")
 
 
 class ProxyPool:
-    """58ip 动态代理：独占租约，同一 IP 同一时刻只给一条请求。"""
+    """线程内粘滞：同一条代理一直用到超时/失败，再换下一条。"""
 
     def __init__(self, api: str, max_extract: int = 50, refresh_seconds: int = 180):
         self.api = api
         self.max_extract = min(50, max(1, int(max_extract)))
         self.refresh_seconds = refresh_seconds
         self._lock = threading.Lock()
-        self._free: deque[str] = deque()
-        self._used: deque[str] = deque()
-        self._in_use: set[str] = set()
+        self._local = threading.local()
+        self._proxies: list[str] = []
         self._bad: set[str] = set()
+        self._idx = 0
         self._fetched_at = 0.0
+        self._min_fetch_gap = 15.0
 
     def acquire(self) -> Optional[str]:
+        sticky = getattr(self._local, "proxy", None)
         with self._lock:
+            if sticky and sticky not in self._bad:
+                return sticky
             self._maybe_refresh_unlocked()
-            ip = self._take_unlocked()
-            if ip:
-                return ip
-            self._refresh_unlocked()
-            return self._take_unlocked()
+            ip = self._next_unlocked()
+            if not ip:
+                self._refresh_unlocked()
+                ip = self._next_unlocked()
+        self._local.proxy = ip
+        return ip
 
     def release(self, proxy: Optional[str], *, bad: bool = False) -> None:
+        if bad:
+            self.report_bad(proxy)
+
+    def report_bad(self, proxy: Optional[str]) -> None:
         if not proxy:
             return
         with self._lock:
-            self._in_use.discard(proxy)
-            if bad:
-                self._bad.add(proxy)
-            elif proxy not in self._bad:
-                self._used.append(proxy)
-            if self._available_unlocked() <= 3:
+            self._bad.add(proxy)
+            alive = [p for p in self._proxies if p not in self._bad]
+            if len(alive) <= 2:
                 self._refresh_unlocked()
+        if getattr(self._local, "proxy", None) == proxy:
+            self._local.proxy = None
 
-    def report_bad(self, proxy: Optional[str]) -> None:
-        self.release(proxy, bad=True)
-
-    def _take_unlocked(self) -> Optional[str]:
-        ip = self._pop_unused(self._free)
-        if ip:
-            return ip
-        return self._pop_unused(self._used)
-
-    def _pop_unused(self, q: deque[str]) -> Optional[str]:
-        n = len(q)
-        for _ in range(n):
-            ip = q.popleft()
-            if ip in self._bad or ip in self._in_use:
-                continue
-            self._in_use.add(ip)
-            return ip
-        return None
-
-    def _available_unlocked(self) -> int:
-        return len(
-            [p for p in list(self._free) + list(self._used) if p not in self._bad and p not in self._in_use]
-        )
+    def _next_unlocked(self) -> Optional[str]:
+        alive = [p for p in self._proxies if p not in self._bad]
+        if not alive:
+            return None
+        self._idx = self._idx % len(alive)
+        ip = alive[self._idx]
+        self._idx = (self._idx + 1) % len(alive)
+        return ip
 
     def _maybe_refresh_unlocked(self) -> None:
-        if not self._free and not self._used and not self._in_use:
+        if not self._proxies:
             self._refresh_unlocked()
             return
         if self._fetched_at and time.time() - self._fetched_at >= self.refresh_seconds:
             self._refresh_unlocked()
 
     def _refresh_unlocked(self) -> None:
+        if self._fetched_at and time.time() - self._fetched_at < self._min_fetch_gap:
+            return
         found = self._fetch()
         if not found:
             return
-        self._free = deque(ip for ip in found if ip not in self._in_use)
-        self._used = deque()
-        self._bad = {ip for ip in self._bad if ip in self._in_use}
+        keep_bad = {ip for ip in self._bad if ip in found}
+        self._proxies = found
+        self._bad = keep_bad
+        self._idx = 0
         self._fetched_at = time.time()
         print(
-            f"  [proxy] 提取 {len(found)} 条（上限 {self.max_extract}，占用中 {len(self._in_use)}）",
+            f"  [proxy] 提取 {len(found)} 条（上限 {self.max_extract}，拉黑 {len(self._bad)}）",
             flush=True,
         )
 
@@ -105,9 +100,7 @@ class ProxyPool:
         seen: set[str] = set()
         for raw in text.replace(",", "\n").splitlines():
             line = raw.strip()
-            if not IP_PORT.match(line):
-                continue
-            if line in seen:
+            if not IP_PORT.match(line) or line in seen:
                 continue
             seen.add(line)
             found.append(line)

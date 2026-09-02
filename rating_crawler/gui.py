@@ -217,7 +217,7 @@ class App(tk.Tk):
         _field(1, 0, "栏目标签", "、".join(cats), span=3)
         _field(2, 0, "断点续跑", "开启；失败和本地缺失会重下，成功文件跳过")
         _field(2, 1, "需登录文件", "直接失败（非公开发行企业债不重试）")
-        _field(3, 0, "下载超时", "10 秒；5 次不同代理再直连，每次 10 秒；同一 IP 同时只给一条请求", span=3)
+        _field(3, 0, "下载超时", "10 秒；一条代理用到超时再换下一条，最多换 5 次后直连", span=3)
 
     def _names_in_box(self) -> list[str]:
         return [n for _, n in parse_manual_names(self.manual.get("1.0", "end"))]
