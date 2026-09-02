@@ -5,8 +5,8 @@ import re
 from typing import Any, Iterator, Optional
 from urllib.parse import urljoin
 
-from .http import UA, BrowserSession, _looks_like_login
-from .util import guess_agency, is_pdf, today_str
+from .http import UA, BrowserSession, DownloadError, explain_download_failure
+from .util import guess_agency, today_str
 
 HOME = "https://www.chinabond.com.cn/xxpl/ywzc_fxyfxdh/fxyfxdh_zqzl/"
 LIST_API = "https://www.chinabond.com.cn/cbiw/trs/getContentByConditions"
@@ -183,9 +183,9 @@ class ChinaBondClient:
         self.ensure()
         url = item.get("pdf_url") or ""
         if not url:
-            raise RuntimeError("no pdf url")
+            raise DownloadError("no_url", "无下载地址", 0, "")
         if item.get("locked"):
-            raise RuntimeError("login required")
+            raise DownloadError("login", "登录问题（非公开文件）", 0, url)
         resp = self.http.get_file(
             url,
             headers={
@@ -197,12 +197,9 @@ class ChinaBondClient:
             warmup=self.warmup,
         )
         data = resp.content or b""
-        if _looks_like_login(resp):
-            raise RuntimeError("login required")
-        if resp.status_code != 200 or not data:
-            raise RuntimeError(f"download failed {resp.status_code} {url}")
-        if item.get("suffix") == "pdf" and not is_pdf(data):
-            raise RuntimeError(f"not a pdf ({resp.headers.get('content-type')}) {url}")
+        fail = explain_download_failure(resp, url=url, want_pdf=item.get("suffix") == "pdf")
+        if fail:
+            raise fail
         return data, item.get("title") or ""
 
 

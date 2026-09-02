@@ -6,6 +6,7 @@ import os
 import queue
 import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -156,8 +157,7 @@ class App(tk.Tk):
         head.pack(fill="x", padx=8, pady=(6, 2))
         self.detail_meta = ttk.Label(head, text="尚未选择公司", foreground="#555")
         self.detail_meta.pack(side="left")
-        ttk.Button(head, text="复制选中链接", command=self._copy_selected_url).pack(side="right")
-        ttk.Button(head, text="复制全部失败链接", command=self._copy_failed_urls).pack(side="right", padx=6)
+        ttk.Button(head, text="打开详情页", command=self._open_selected_detail).pack(side="right")
         cols = ("title", "category", "page", "status", "error", "url")
         wrap = ttk.Frame(box)
         wrap.pack(fill="both", expand=True, padx=6, pady=(0, 6))
@@ -167,7 +167,7 @@ class App(tk.Tk):
         self.detail.heading("page", text="页")
         self.detail.heading("status", text="状态")
         self.detail.heading("error", text="失败原因")
-        self.detail.heading("url", text="链接")
+        self.detail.heading("url", text="详情页")
         self.detail.column("title", width=240)
         self.detail.column("category", width=100, stretch=False)
         self.detail.column("page", width=40, stretch=False)
@@ -182,8 +182,8 @@ class App(tk.Tk):
         self.detail.configure(yscrollcommand=vsb.set)
         self.detail.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-        self.detail.bind("<Control-c>", lambda _e: self._copy_selected_url())
-        self.detail.bind("<Double-1>", lambda _e: self._copy_selected_url())
+        self.detail.bind("<Return>", lambda _e: self._open_selected_detail())
+        self.detail.bind("<Double-1>", lambda _e: self._open_selected_detail())
         self.detail.bind("<Button-3>", self._detail_menu)
         return box
 
@@ -702,6 +702,7 @@ class App(tk.Tk):
                 "status": payload.get("status") or rec.get("status") or "listed",
                 "error": payload.get("error") or rec.get("error") or "",
                 "url": payload.get("url") or payload.get("pdf_url") or rec.get("url") or "",
+                "detail_url": payload.get("detail_url") or rec.get("detail_url") or "",
             }
         )
         store[fid] = rec
@@ -787,19 +788,10 @@ class App(tk.Tk):
                     page_s,
                     FILE_STATUS.get(status, status),
                     str(f.get("error") or "")[:120],
-                    str(f.get("url") or ""),
+                    str(f.get("detail_url") or f.get("url") or ""),
                 ),
                 tags=(tag,) if tag else (),
             )
-
-    def _copy_text(self, text: str, ok_msg: str) -> None:
-        text = (text or "").strip()
-        if not text:
-            self.status.config(text="没有可复制的链接")
-            return
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        self.status.config(text=ok_msg)
 
     def _selected_detail_url(self) -> str:
         sel = self.detail.selection()
@@ -810,31 +802,20 @@ class App(tk.Tk):
             return ""
         return str(vals[5] or "").strip()
 
-    def _copy_selected_url(self) -> None:
+    def _open_selected_detail(self) -> None:
         url = self._selected_detail_url()
-        self._copy_text(url, "已复制选中链接")
-
-    def _copy_failed_urls(self) -> None:
-        urls: list[str] = []
-        seen: set[str] = set()
-        for iid in self.detail.get_children():
-            vals = self.detail.item(iid, "values")
-            if not vals or len(vals) < 6:
-                continue
-            status = str(vals[3] or "")
-            url = str(vals[5] or "").strip()
-            if status == "失败" and url and url not in seen:
-                seen.add(url)
-                urls.append(url)
-        self._copy_text("\n".join(urls), f"已复制 {len(urls)} 条失败链接")
+        if not url:
+            self.status.config(text="没有详情页链接")
+            return
+        webbrowser.open(url)
+        self.status.config(text="已打开详情页")
 
     def _detail_menu(self, event) -> None:
         row = self.detail.identify_row(event.y)
         if row:
             self.detail.selection_set(row)
         menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="复制选中链接", command=self._copy_selected_url)
-        menu.add_command(label="复制全部失败链接", command=self._copy_failed_urls)
+        menu.add_command(label="打开详情页", command=self._open_selected_detail)
         menu.tk_popup(event.x_root, event.y_root)
 
     def _open_out(self) -> None:

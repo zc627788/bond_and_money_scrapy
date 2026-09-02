@@ -28,6 +28,8 @@ JSONL_COLUMNS = [
     "sha256",
     "status",
     "error",
+    "error_code",
+    "http_status",
     "is_duplicate",
     "duplicate_of",
     "dup_reason",
@@ -45,6 +47,29 @@ CSV_COLUMNS = [
     "detail_url",
     "pdf_url",
     "local_path",
+    "status",
+    "http_status",
+    "error_code",
+    "error",
+    "is_duplicate",
+    "duplicate_of",
+    "dup_reason",
+]
+
+INV_COLUMNS = [
+    "issuer_name",
+    "found_for",
+    "source",
+    "category",
+    "agency",
+    "title",
+    "publish_date",
+    "detail_url",
+    "pdf_url",
+    "local_path",
+    "status",
+    "http_status",
+    "error_code",
     "error",
     "is_duplicate",
     "duplicate_of",
@@ -88,21 +113,23 @@ def write_tables(rows: list[dict[str, Any]], out_dir: Path, query_start: str = "
         row["title"] = _clean_title(row.get("title") or "")
         if row.get("status") == "ok":
             row["error"] = ""
+            row["error_code"] = ""
 
-    def to_csv(part: list[dict[str, Any]], name: str) -> None:
+    def to_csv(part: list[dict[str, Any]], name: str, columns: list[str]) -> None:
         df = pd.DataFrame(part)
-        for col in CSV_COLUMNS:
+        for col in columns:
             if col not in df.columns:
                 df[col] = ""
-        df = df[CSV_COLUMNS]
-        for col in CSV_COLUMNS:
+        df = df[columns]
+        for col in columns:
             df[col] = df[col].fillna("").astype(str).replace({"nan": "", "None": ""})
         df.to_csv(out_dir / name, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_ALL)
 
     money = [r for r in rows if r.get("source") == "chinamoney"]
     bond = [r for r in rows if r.get("source") == "chinabond"]
-    to_csv(money, "chinamoney.csv")
-    to_csv(bond, "chinabond.csv")
+    to_csv(money, "chinamoney.csv", CSV_COLUMNS)
+    to_csv(bond, "chinabond.csv", CSV_COLUMNS)
+    to_csv(_inventory_rows(rows), "inventory.csv", INV_COLUMNS)
 
     summary_rows = []
     for src, part in (("chinamoney", money), ("chinabond", bond)):
@@ -114,6 +141,35 @@ def write_tables(rows: list[dict[str, Any]], out_dir: Path, query_start: str = "
             {"source": src, "rows": len(part), "ok": ok, "fail": fail, "locked": locked, "duplicate": dup}
         )
     pd.DataFrame(summary_rows).to_csv(out_dir / "summary.csv", index=False, encoding="utf-8-sig")
+
+
+def _inventory_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """同一 source+content_id 只留一条；失败也写入。"""
+    rank = {"ok": 3, "locked": 2, "fail": 2, "not_pdf": 1, "listed": 0, "empty": 0}
+    uniq: dict[str, dict[str, Any]] = {}
+    found: dict[str, list[str]] = {}
+    for row in rows:
+        if row.get("status") == "empty":
+            continue
+        cid = str(row.get("content_id") or "")
+        if not cid:
+            continue
+        key = f"{row.get('source')}|{cid}"
+        names = found.setdefault(key, [])
+        issuer = str(row.get("issuer_name") or "")
+        if issuer and issuer not in names:
+            names.append(issuer)
+        prev = uniq.get(key)
+        if not prev or rank.get(str(row.get("status") or ""), 0) > rank.get(str(prev.get("status") or ""), 0):
+            uniq[key] = dict(row)
+    out = []
+    for key, row in uniq.items():
+        names = found.get(key) or []
+        row["found_for"] = "；".join(names)
+        if names and not row.get("issuer_name"):
+            row["issuer_name"] = names[0]
+        out.append(row)
+    return out
 
 
 def mark_duplicates(rows: list[dict[str, Any]]) -> None:

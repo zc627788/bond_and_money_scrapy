@@ -8,8 +8,8 @@ import time
 from typing import Any, Iterator, Optional
 from urllib.parse import unquote
 
-from .http import UA, BrowserSession, _looks_like_login
-from .util import guess_agency, is_pdf, today_str
+from .http import UA, BrowserSession, DownloadError, explain_download_failure
+from .util import guess_agency, today_str
 
 HOME = "https://www.chinamoney.com.cn/chinese/pjgg/"
 APPLY = "https://www.chinamoney.com.cn/dqs/rest/cm-u-rbt/apply"
@@ -160,12 +160,9 @@ class ChinaMoneyClient:
         )
         data = resp.content or b""
         filename = _filename_from_cd(resp.headers.get("content-disposition", "")) or ""
-        if _looks_like_login(resp):
-            raise RuntimeError("login required")
-        if resp.status_code != 200 or not data:
-            raise RuntimeError(f"download failed {resp.status_code} {url}")
-        if not is_pdf(data) and (item.get("suffix") == "pdf"):
-            raise RuntimeError(f"not a pdf ({resp.headers.get('content-type')}) {url}")
+        fail = explain_download_failure(resp, url=url, want_pdf=item.get("suffix") == "pdf")
+        if fail:
+            raise fail
         return data, filename
 
 

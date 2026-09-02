@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import Any, Iterable, Optional
 
 from .chinabond import ChinaBondClient
 from .chinamoney import ChinaMoneyClient
-from .http import BrowserSession
+from .http import BrowserSession, explain_exception
 from .inventory import append_jsonl, load_jsonl, mark_duplicates, write_tables
 from .progress import Progress
 from .proxy import ProxyPool
@@ -385,6 +386,7 @@ class Crawler:
                     "page": page,
                     "status": status,
                     "url": str(it.get("pdf_url") or ""),
+                    "detail_url": str(it.get("detail_url") or ""),
                 }
             )
         return out
@@ -714,6 +716,7 @@ class Crawler:
                 "page": int(item.get("_page") or 0),
                 "status": "downloading",
                 "url": item.get("pdf_url") or "",
+                "detail_url": item.get("detail_url") or "",
             },
         )
         http = self._bind_progress(
@@ -724,9 +727,39 @@ class Crawler:
             category=item.get("category") or "",
             page=int(item.get("_page") or 0),
             url=item.get("pdf_url") or "",
+            detail_url=item.get("detail_url") or "",
             scope="download",
         )
         try:
+            copied = self._copy_known_file(name, item, dest)
+            if copied:
+                row["local_path"] = str(dest.relative_to(self.root))
+                row["file_size"] = dest.stat().st_size
+                row["sha256"] = sha256_file(dest)
+                row["status"] = "ok"
+                row["error"] = ""
+                row["error_code"] = ""
+                row["http_status"] = 200
+                self._write_row(row)
+                self._bump_download_counter(name, job_key, prev, "ok")
+                self._hook(
+                    "file_done",
+                    {
+                        "id": task_id,
+                        "status": "ok",
+                        "path": row["local_path"],
+                        "issuer": name,
+                        "source": source,
+                        "title": item.get("title") or "",
+                        "category": item.get("category") or "",
+                        "page": int(item.get("_page") or 0),
+                        "error": "",
+                        "error_code": "",
+                        "url": item.get("pdf_url") or "",
+                        "detail_url": item.get("detail_url") or "",
+                    },
+                )
+                return "ok"
             client = self.cm if source == "chinamoney" else self.cb
             data, remote_name = client.download(item)
             ext = guess_ext(item.get("suffix") or Path(str(remote_name)).suffix, data)
@@ -739,9 +772,13 @@ class Crawler:
             row["sha256"] = sha256_bytes(data)
             row["status"] = "ok" if (ext != "pdf" or is_pdf(data)) else "not_pdf"
             if row["status"] != "ok":
-                row["error"] = "magic mismatch"
+                row["error"] = "不是 PDF"
+                row["error_code"] = "not_pdf"
+                row["http_status"] = 200
             else:
                 row["error"] = ""
+                row["error_code"] = ""
+                row["http_status"] = 200
             self._write_row(row)
             self._bump_download_counter(name, job_key, prev, row["status"])
             self._hook(
@@ -756,14 +793,18 @@ class Crawler:
                     "category": item.get("category") or "",
                     "page": int(item.get("_page") or 0),
                     "error": row.get("error") or "",
+                    "error_code": row.get("error_code") or "",
                     "url": item.get("pdf_url") or "",
+                    "detail_url": item.get("detail_url") or "",
                 },
             )
             return row["status"]
         except Exception as e:
-            login = "login" in str(e).lower() or "locked" in str(e).lower()
-            row["status"] = "locked" if login else "fail"
-            row["error"] = "skip_login" if login else f"{type(e).__name__}: {e}"
+            info = explain_exception(e, url=str(item.get("pdf_url") or ""))
+            row["status"] = "locked" if info.error_code == "login" else "fail"
+            row["error"] = str(info)
+            row["error_code"] = info.error_code
+            row["http_status"] = info.http_status
             self._write_row(row)
             self._bump_download_counter(name, job_key, prev, row["status"])
             self._hook(
@@ -778,7 +819,9 @@ class Crawler:
                     "category": item.get("category") or "",
                     "page": int(item.get("_page") or 0),
                     "error": row.get("error") or "",
+                    "error_code": info.error_code,
                     "url": item.get("pdf_url") or "",
+                    "detail_url": item.get("detail_url") or "",
                 },
             )
             return row["status"]
@@ -808,8 +851,30 @@ class Crawler:
                 "page": int(item.get("_page") or 0),
                 "error": error,
                 "url": item.get("pdf_url") or "",
+                "detail_url": item.get("detail_url") or "",
             },
         )
+
+    def _copy_known_file(self, name: str, item: dict[str, Any], dest: Path) -> bool:
+        cid = str(item.get("content_id") or "")
+        source = str(item.get("source") or "")
+        if not cid:
+            return False
+        with self._jsonl_lock:
+            snapshot = list(self._index.values())
+        for row in snapshot:
+            if str(row.get("content_id") or "") != cid or row.get("source") != source:
+                continue
+            if row.get("issuer_name") == name or row.get("status") != "ok":
+                continue
+            if not self._file_exists(row):
+                continue
+            src = self.root / str(row["local_path"])
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.resolve() != src.resolve():
+                shutil.copy2(src, dest)
+            return dest.exists() and dest.stat().st_size > 1000
+        return False
 
     def _bump_download_counter(self, name: str, job_key: str, prev: str, now: str) -> None:
         if prev == now:
@@ -847,6 +912,8 @@ class Crawler:
             "sha256": "",
             "status": "",
             "error": "",
+            "error_code": "",
+            "http_status": 0,
             "is_duplicate": "0",
             "duplicate_of": "",
             "dup_reason": "",

@@ -352,6 +352,48 @@ def _timeout_like(exc: Exception) -> bool:
     return any(k in text for k in keys)
 
 
+class DownloadError(RuntimeError):
+    def __init__(self, error_code: str, message: str, http_status: int = 0, url: str = ""):
+        super().__init__(message)
+        self.error_code = error_code
+        self.http_status = int(http_status or 0)
+        self.url = url or ""
+
+
+def explain_download_failure(resp: creq.Response, *, url: str = "", want_pdf: bool = True) -> DownloadError | None:
+    from .util import is_pdf
+
+    code = int(resp.status_code or 0)
+    data = resp.content or b""
+    if code == 403:
+        return DownloadError("link", "链接问题（HTTP 403）", 403, url)
+    if code in (401, 407):
+        return DownloadError("login", f"登录问题（HTTP {code}）", code, url)
+    if 200 <= code < 300 and _looks_like_login(resp):
+        return DownloadError("login", f"登录问题（HTTP {code}）", code, url)
+    if code in (404, 410):
+        return DownloadError("missing", f"链接不存在（HTTP {code}）", code, url)
+    if code == 429:
+        return DownloadError("rate", "请求过频（HTTP 429）", 429, url)
+    if code >= 500:
+        return DownloadError("server", f"服务器错误（HTTP {code}）", code, url)
+    if code != 200 or not data:
+        label = "空响应" if not data else f"下载失败（HTTP {code}）"
+        return DownloadError("empty" if not data else "link", label, code, url)
+    if want_pdf and not is_pdf(data):
+        return DownloadError("not_pdf", f"不是 PDF（HTTP {code}）", code, url)
+    return None
+
+
+def explain_exception(exc: Exception, url: str = "") -> DownloadError:
+    if isinstance(exc, DownloadError):
+        return exc
+    if _timeout_like(exc):
+        return DownloadError("timeout", "超时", 0, url)
+    text = str(exc)
+    return DownloadError("error", text[:180], 0, url)
+
+
 def _looks_like_login(resp: creq.Response) -> bool:
     if resp.status_code in (401,):
         return True
