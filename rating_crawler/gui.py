@@ -33,8 +33,8 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("评级报告抓取")
-        self.geometry("860x700")
-        self.minsize(760, 600)
+        self.geometry("1180x740")
+        self.minsize(980, 640)
         self.root_dir = app_root()
         self.bundle_dir = bundled_root()
         self.cfg_path = self.bundle_dir / "config" / "settings.json"
@@ -45,6 +45,7 @@ class App(tk.Tk):
         self._worker: threading.Thread | None = None
         self._q: queue.Queue = queue.Queue()
         self._co: dict[str, dict] = {}
+        self._trees: dict[str, ttk.Treeview] = {}
         self._build()
         self.after(120, self._pump)
 
@@ -98,19 +99,34 @@ class App(tk.Tk):
         self.status = ttk.Label(btn, text="就绪")
         self.status.pack(side="left", padx=16)
 
-        ttk.Label(self, text="按公司进度").pack(anchor="w", padx=12, pady=(8, 0))
-        cols = ("name", "progress", "current")
-        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=12)
-        self.tree.heading("name", text="公司")
-        self.tree.heading("progress", text="进度")
-        self.tree.heading("current", text="当前文件")
-        self.tree.column("name", width=240, stretch=False)
-        self.tree.column("progress", width=150, stretch=False)
-        self.tree.column("current", width=420)
-        self.tree.tag_configure("skipped", foreground="#666")
-        self.tree.tag_configure("queued", foreground="#888")
-        self.tree.pack(fill="both", expand=True, padx=12, pady=6)
+        panes = ttk.Frame(self)
+        panes.pack(fill="both", expand=True, padx=12, pady=6)
+        panes.columnconfigure(0, weight=1)
+        panes.columnconfigure(1, weight=1)
+        panes.rowconfigure(0, weight=1)
+        self._trees["chinamoney"] = self._make_tree(panes, 0, "中国货币网")
+        self._trees["chinabond"] = self._make_tree(panes, 1, "中国债券信息网")
         self._refresh_count()
+
+    def _make_tree(self, parent: ttk.Frame, col: int, title: str) -> ttk.Treeview:
+        box = ttk.LabelFrame(parent, text=title)
+        box.grid(row=0, column=col, sticky="nsew", padx=(0, 8) if col == 0 else (8, 0))
+        cols = ("name", "progress", "current")
+        tree = ttk.Treeview(box, columns=cols, show="headings", height=12)
+        tree.heading("name", text="公司")
+        tree.heading("progress", text="进度")
+        tree.heading("current", text="当前 / 说明")
+        tree.column("name", width=180, stretch=False)
+        tree.column("progress", width=150, stretch=False)
+        tree.column("current", width=220)
+        tree.tag_configure("skipped", foreground="#666")
+        tree.tag_configure("queued", foreground="#888")
+        tree.tag_configure("fail", foreground="#a40000")
+        vsb = ttk.Scrollbar(box, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
+        vsb.pack(side="right", fill="y", pady=6)
+        return tree
 
     def _build_fixed_params(self) -> None:
         box = ttk.LabelFrame(self, text="本次查询（固定，不可改）")
@@ -140,8 +156,9 @@ class App(tk.Tk):
         _field(0, 0, "时间范围", f"{start} 至 {today_str()}（全部历史）")
         _field(0, 1, "数据来源", "中国货币网、中国债券信息网")
         _field(1, 0, "栏目标签", "、".join(cats), span=3)
-        _field(2, 0, "断点续跑", "开启（已完成的公司显示为「已爬取，跳过」）")
-        _field(2, 1, "需登录文件", "跳过（非公开发行企业债不下载）")
+        _field(2, 0, "断点续跑", "开启；失败和本地缺失会重下，成功文件跳过")
+        _field(2, 1, "需登录文件", "直接失败（非公开发行企业债不重试）")
+        _field(3, 0, "下载超时", "10 秒；不通则换 2 次代理，再直连，每次都是 10 秒", span=3)
 
     def _names_in_box(self) -> list[str]:
         return [n for _, n in parse_manual_names(self.manual.get("1.0", "end"))]
@@ -222,11 +239,11 @@ class App(tk.Tk):
             messagebox.showerror("名单", "请在文本框填写公司，或先导入 CSV")
             return
         self._co.clear()
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
+        for tree in self._trees.values():
+            for iid in tree.get_children():
+                tree.delete(iid)
         for _, name in issuers:
-            st = self._ensure_company(name)
-            st["phase"] = "queued"
+            self._ensure_company(name)
             self._paint(name)
         self.btn_start.config(state="disabled")
         self.btn_pause.config(state="normal")
@@ -267,35 +284,63 @@ class App(tk.Tk):
             self.btn_resume.config(state="disabled")
             self.status.config(text="抓取中")
 
+    def _blank_side(self) -> dict:
+        return {
+            "iid": "",
+            "total": 0,
+            "done": 0,
+            "fail": 0,
+            "skip": 0,
+            "locked": 0,
+            "missing": 0,
+            "retry": 0,
+            "current": "",
+            "phase": "queued",
+        }
+
     def _ensure_company(self, name: str) -> dict:
         if name not in self._co:
-            iid = self.tree.insert("", "end", values=(name, "排队", ""), tags=("queued",))
-            self._co[name] = {
-                "iid": iid,
-                "total": 0,
-                "done": 0,
-                "fail": 0,
-                "current": "",
-                "phase": "queued",
-            }
+            rec: dict = {}
+            for src, tree in self._trees.items():
+                iid = tree.insert("", "end", values=(name, "排队", ""), tags=("queued",))
+                rec[src] = {**self._blank_side(), "iid": iid}
+            self._co[name] = rec
         return self._co[name]
 
-    def _paint(self, name: str) -> None:
-        st = self._co.get(name)
-        if not st:
+    def _side(self, name: str, source: str) -> dict:
+        rec = self._ensure_company(name)
+        if source not in rec:
+            rec[source] = self._blank_side()
+        return rec[source]
+
+    def _paint(self, name: str, source: str | None = None) -> None:
+        rec = self._co.get(name)
+        if not rec:
+            return
+        sources = [source] if source else list(self._trees)
+        for src in sources:
+            self._paint_side(name, src, rec.get(src) or self._blank_side())
+
+    def _paint_side(self, name: str, source: str, st: dict) -> None:
+        tree = self._trees.get(source)
+        if not tree or not st.get("iid"):
             return
         total = int(st["total"])
         done = int(st["done"])
         fail = int(st["fail"])
+        skip = int(st.get("skip") or 0)
+        locked = int(st.get("locked") or 0)
+        missing = int(st.get("missing") or 0)
+        retry = int(st.get("retry") or 0)
         finished = done + fail
         phase = st.get("phase") or "queued"
         current = st.get("current") or ""
-        tags = ()
+        tags: tuple[str, ...] = ()
         if phase == "skipped":
             prog = f"已爬取，跳过  {done}个文件" if done else "已爬取，跳过"
-            if fail:
-                prog += f" · 失败{fail}"
             current = current or "此前已完成，本次跳过"
+            if locked:
+                current += f" · 锁定 {locked}"
             tags = ("skipped",)
         elif phase == "queued":
             prog = "排队"
@@ -307,14 +352,31 @@ class App(tk.Tk):
                 pct = int(finished * 100 / total) if total else 0
                 prog = f"{finished}/{total}  {pct}%"
             current = current or "未全部完成，下次续跑"
+            tags = ("fail",)
         elif total <= 0:
             prog = "查询中" if phase == "running" else "无文件"
+            if locked and phase != "running":
+                current = current or f"锁定 {locked}，已跳过"
         else:
             pct = int(finished * 100 / total)
             prog = f"{finished}/{total}  {pct}%"
-            if phase == "done" and finished >= total and not current:
+            notes = []
+            if skip and phase == "running" and done == skip and not fail:
+                notes.append(f"已有 {skip}")
+            if missing:
+                notes.append(f"补缺失 {missing}")
+            if retry:
+                notes.append(f"重试失败 {retry}")
+            if locked:
+                notes.append(f"锁定 {locked}")
+            if notes and (not current or current == "正在查询列表…"):
+                current = " · ".join(notes)
+            if phase == "done" and fail:
+                prog += f" · 失败{fail}"
+                tags = ("fail",)
+            elif phase == "done" and finished >= total and not current:
                 current = "完成"
-        self.tree.item(st["iid"], values=(name, prog, current), tags=tags)
+        tree.item(st["iid"], values=(name, prog, current), tags=tags)
 
     def _pump(self) -> None:
         try:
@@ -322,59 +384,85 @@ class App(tk.Tk):
                 kind, payload = self._q.get_nowait()
                 if kind == "issuer":
                     name = payload.get("name") or ""
-                    st = self._ensure_company(name)
+                    rec = self._ensure_company(name)
                     phase = payload.get("phase") or "start"
-                    if phase == "start":
-                        st["phase"] = "running"
-                        if not st.get("current"):
-                            st["current"] = "正在查询列表…"
-                    elif phase == "done":
-                        st["phase"] = "done"
-                        if st.get("current") in {"", "正在查询列表…"}:
-                            st["current"] = "完成"
-                    elif phase == "failed":
-                        st["phase"] = "failed"
+                    for src, st in rec.items():
+                        if phase == "start":
+                            st["phase"] = "running"
+                            if not st.get("current"):
+                                st["current"] = "正在查询列表…"
+                        elif phase == "done":
+                            if st.get("phase") != "skipped":
+                                st["phase"] = "failed" if st.get("fail") else "done"
+                                if st.get("current") in {"", "正在查询列表…"}:
+                                    st["current"] = "完成" if st["phase"] == "done" else "未全部完成，下次续跑"
+                        elif phase == "failed":
+                            st["phase"] = "failed"
                     self._paint(name)
                 elif kind == "skipped":
                     name = payload.get("name") or ""
-                    st = self._ensure_company(name)
-                    st["phase"] = "skipped"
-                    st["done"] = int(payload.get("ok") or 0)
-                    st["fail"] = int(payload.get("fail") or 0)
-                    locked = int(payload.get("locked") or 0)
-                    if st["done"]:
-                        st["current"] = f"此前已完成，本次跳过 · {st['done']} 个文件"
-                    else:
-                        st["current"] = "此前已完成（无文件），本次跳过"
-                    if st["fail"]:
-                        st["current"] += f" · 失败 {st['fail']}"
-                    if locked:
-                        st["current"] += f" · 锁定 {locked}"
+                    rec = self._ensure_company(name)
+                    by_source = payload.get("by_source") or {}
+                    for src, st in rec.items():
+                        info = by_source.get(src) or {}
+                        st["phase"] = "skipped"
+                        st["done"] = int(info.get("ok") or 0)
+                        st["fail"] = 0
+                        st["locked"] = int(info.get("locked") or 0)
+                        st["skip"] = st["done"]
+                        if st["done"]:
+                            st["current"] = f"此前已完成，本次跳过 · {st['done']} 个文件"
+                        else:
+                            st["current"] = "此前已完成（无文件），本次跳过"
+                        if st["locked"]:
+                            st["current"] += f" · 锁定 {st['locked']}"
                     self._paint(name)
                 elif kind == "listed":
                     name = payload.get("issuer") or ""
-                    st = self._ensure_company(name)
+                    src = payload.get("source") or ""
+                    if src not in self._trees:
+                        continue
+                    st = self._side(name, src)
                     st["phase"] = "running"
                     st["total"] = int(payload.get("total") or 0)
                     st["done"] = int(payload.get("done") or 0)
-                    self._paint(name)
+                    st["skip"] = int(payload.get("skip") or st["done"])
+                    st["locked"] = int(payload.get("locked") or 0)
+                    st["missing"] = int(payload.get("missing") or 0)
+                    st["retry"] = int(payload.get("retry") or 0)
+                    bits = []
+                    if st["missing"]:
+                        bits.append(f"补缺失 {st['missing']}")
+                    if st["retry"]:
+                        bits.append(f"重试失败 {st['retry']}")
+                    if st["skip"]:
+                        bits.append(f"已有 {st['skip']}")
+                    if st["locked"]:
+                        bits.append(f"锁定 {st['locked']}")
+                    st["current"] = " · ".join(bits) if bits else st.get("current") or ""
+                    self._paint(name, src)
                 elif kind == "file_start":
                     name = payload.get("issuer") or ""
-                    st = self._ensure_company(name)
-                    src = "货币网" if payload.get("source") == "chinamoney" else "中债"
-                    title = str(payload.get("title") or "")[:60]
-                    st["current"] = f"{src} · {title}"
-                    self._paint(name)
+                    src = payload.get("source") or ""
+                    if src not in self._trees:
+                        continue
+                    st = self._side(name, src)
+                    st["current"] = str(payload.get("title") or "")[:50]
+                    self._paint(name, src)
                 elif kind == "file_done":
                     name = payload.get("issuer") or ""
-                    st = self._ensure_company(name)
-                    if payload.get("status") == "ok":
+                    src = payload.get("source") or ""
+                    if src not in self._trees:
+                        continue
+                    st = self._side(name, src)
+                    status = payload.get("status")
+                    if status == "ok":
                         st["done"] = int(st["done"]) + 1
+                    elif status == "locked":
+                        st["locked"] = int(st.get("locked") or 0) + 1
                     else:
                         st["fail"] = int(st["fail"]) + 1
-                    if st["current"] and "失败" not in str(st["current"]):
-                        pass
-                    self._paint(name)
+                    self._paint(name, src)
                 elif kind == "done":
                     self.status.config(text=str(payload))
                     self.btn_start.config(state="normal")

@@ -118,26 +118,25 @@ class Crawler:
         sources = tuple(sources)
         todo = []
         for seq, name in issuers:
-            if resume and self.progress.is_done(name):
-                counts = self._issuer_file_counts(name)
-                extra = f"，已有 {counts['ok']} 个文件" if counts["ok"] else "，此前无文件"
-                if counts["fail"]:
-                    extra += f"，失败 {counts['fail']}"
-                if counts["locked"]:
-                    extra += f"，锁定 {counts['locked']}"
-                self.log(f"[skip] {seq} {name} already done{extra}")
-                self._hook(
-                    "skipped",
-                    {
-                        "seq": seq,
-                        "name": name,
-                        "ok": counts["ok"],
-                        "fail": counts["fail"],
-                        "skip": counts["skip"],
-                        "locked": counts["locked"],
-                    },
-                )
+            stats = {src: self._source_disk_stats(name, src) for src in sources}
+            lists_ok = self._lists_complete(name, sources)
+            need = (not lists_ok) or any(st["need"] for st in stats.values())
+            if resume and lists_ok and not need:
+                bits = []
+                for src in sources:
+                    st = stats[src]
+                    label = "货币网" if src == "chinamoney" else "债券网"
+                    if st["ok"]:
+                        bits.append(f"{label} {st['ok']} 个文件")
+                    else:
+                        bits.append(f"{label} 无文件")
+                    if st["locked"]:
+                        bits[-1] += f"，锁定 {st['locked']}"
+                self.log(f"[skip] {seq} {name} already done，{'；'.join(bits)}")
+                self._hook("skipped", {"seq": seq, "name": name, "by_source": stats})
                 continue
+            if resume and lists_ok and need:
+                self._log_repair(seq, name, stats)
             todo.append((seq, name))
         n = max(1, min(self.issuer_workers, len(todo) or 1))
         self.log(f"公司并发 {n}，每家下载线程 {self.workers}（代理池共享）")
@@ -205,12 +204,15 @@ class Crawler:
                         "status": "empty",
                     }
                 )
-            self._hook("listed", {"issuer": name, "total": 0, "done": 0})
-            return self._lists_complete(name, sources)
+            for src in sources:
+                self._hook("listed", {"issuer": name, "source": src, "total": 0, "done": 0, "skip": 0, "locked": 0, "missing": 0, "retry": 0})
+            return self._issuer_complete(name, sources)
 
         if download:
-            self._download_many(name, pending)
-        return self._lists_complete(name, sources)
+            for src in sources:
+                subset = [it for it in pending if it.get("source") == src]
+                self._download_many(name, subset, source=src)
+        return self._issuer_complete(name, sources)
 
     def _issuer_file_counts(self, name: str) -> dict[str, int]:
         jobs = (self.progress.snapshot(name).get("jobs") or {}).values()
@@ -220,6 +222,78 @@ class Crawler:
             "skip": sum(int(j.get("download_skip") or 0) for j in jobs),
             "locked": sum(int(j.get("locked") or 0) for j in jobs),
         }
+
+    def _log_repair(self, seq: int, name: str, stats: dict[str, dict[str, int]]) -> None:
+        bits = []
+        for src, st in stats.items():
+            label = "货币网" if src == "chinamoney" else "债券网"
+            parts = []
+            if st["missing"]:
+                parts.append(f"缺失 {st['missing']}")
+            if st["fail"]:
+                parts.append(f"失败 {st['fail']}")
+            if parts:
+                bits.append(f"{label} {'、'.join(parts)}")
+        self.log(f"[repair] {seq} {name} 将重下：{'；'.join(bits) or '未完成列表'}")
+
+    def _file_exists(self, row: dict[str, Any]) -> bool:
+        path = row.get("local_path") or ""
+        if not path:
+            return False
+        dest = self.root / path
+        try:
+            return dest.exists() and dest.stat().st_size > 1000
+        except OSError:
+            return False
+
+    def _source_disk_stats(self, name: str, source: str) -> dict[str, int]:
+        ok = fail = locked = missing = 0
+        with self._jsonl_lock:
+            snapshot = list(self._index.values())
+        for row in snapshot:
+            if row.get("issuer_name") != name or row.get("source") != source:
+                continue
+            if not _row_relevant(name, row):
+                continue
+            st = row.get("status")
+            if st == "locked":
+                locked += 1
+            elif st in {"fail", "not_pdf"}:
+                fail += 1
+            elif st == "ok":
+                if self._file_exists(row):
+                    ok += 1
+                else:
+                    missing += 1
+        return {
+            "ok": ok,
+            "fail": fail,
+            "locked": locked,
+            "missing": missing,
+            "need": int(fail + missing > 0),
+        }
+
+    def _issuer_complete(self, name: str, sources: tuple[str, ...]) -> bool:
+        if not self._lists_complete(name, sources):
+            return False
+        return not any(self._source_disk_stats(name, src)["need"] for src in sources)
+
+    def _download_reason(self, name: str, item: dict[str, Any]) -> str:
+        row = item.get("_row") or {}
+        if item.get("locked") or row.get("status") == "locked":
+            return "locked"
+        if not item.get("pdf_url"):
+            return "no_url"
+        if self._file_exists(row):
+            return "exists"
+        dest = self._dest_path(row if row.get("issuer_name") else self._to_row(0, name, item), item)
+        if dest.exists() and dest.stat().st_size > 1000:
+            return "exists_path"
+        if row.get("status") == "ok":
+            return "missing"
+        if row.get("status") in {"fail", "not_pdf"}:
+            return "retry_fail"
+        return "new"
 
     def _lists_complete(self, name: str, sources: tuple[str, ...]) -> bool:
         jobs = (self.progress.snapshot(name).get("jobs") or {})
@@ -352,38 +426,70 @@ class Crawler:
             out.append(item)
         return out
 
-    def _download_many(self, name: str, items: list[dict[str, Any]]) -> None:
-        todo = []
+    def _download_many(self, name: str, items: list[dict[str, Any]], source: str = "") -> None:
+        todo: list[dict[str, Any]] = []
         already = 0
+        locked_n = 0
+        missing_n = 0
+        retry_n = 0
+        src = source or (items[0].get("source") if items else "")
+        label = "货币网" if src == "chinamoney" else "债券网"
         for item in items:
             row = item.get("_row") or {}
             if not _row_relevant(name, row if row.get("title") else item):
                 continue
-            if item.get("locked") or row.get("status") == "locked":
+            reason = self._download_reason(name, item)
+            if reason == "locked":
+                locked_n += 1
                 continue
-            if not item.get("pdf_url"):
+            if reason == "no_url":
                 continue
-            if row.get("status") == "ok" and row.get("local_path"):
-                dest = self.root / row["local_path"]
-                if dest.exists() and dest.stat().st_size > 1000:
-                    already += 1
-                    continue
-            dest = self._dest_path(row if row.get("issuer_name") else self._to_row(0, name, item), item)
-            if dest.exists() and dest.stat().st_size > 1000:
+            if reason == "exists":
+                already += 1
+                continue
+            if reason == "exists_path":
+                dest = self._dest_path(row if row.get("issuer_name") else self._to_row(0, name, item), item)
                 row["local_path"] = str(dest.relative_to(self.root))
                 row["file_size"] = dest.stat().st_size
                 row["sha256"] = sha256_file(dest)
                 row["status"] = "ok"
+                row["error"] = ""
                 self._write_row(row)
                 self.progress.add_download(name, _job_key(item), "download_skip")
                 already += 1
                 continue
+            if reason == "missing":
+                missing_n += 1
+            elif reason == "retry_fail":
+                retry_n += 1
             todo.append(item)
-        self._hook("listed", {"issuer": name, "total": already + len(todo), "done": already})
+        self._hook(
+            "listed",
+            {
+                "issuer": name,
+                "source": src,
+                "total": already + len(todo),
+                "done": already,
+                "skip": already,
+                "locked": locked_n,
+                "missing": missing_n,
+                "retry": retry_n,
+            },
+        )
         if not todo:
-            self.log("  下载无可新文件")
+            extra = f"，锁定 {locked_n}" if locked_n else ""
+            self.log(f"  {label} 无可新文件{extra}" if items or locked_n else f"  {label} 无记录")
             return
-        self.log(f"  下载 {len(todo)} 个文件 workers={self.workers}")
+        bits = [f"{len(todo)} 个"]
+        if missing_n:
+            bits.append(f"缺失 {missing_n}")
+        if retry_n:
+            bits.append(f"失败重试 {retry_n}")
+        if already:
+            bits.append(f"已有 {already}")
+        if locked_n:
+            bits.append(f"锁定跳过 {locked_n}")
+        self.log(f"  {label} 下载 {'，'.join(bits)} workers={self.workers}")
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
             futs = {pool.submit(self._download_one, name, item): item for item in todo}
             for fut in as_completed(futs):
@@ -401,17 +507,19 @@ class Crawler:
         dest = self._dest_path(row, item)
         job_key = _job_key(item)
         task_id = str(item.get("content_id") or id(item))
+        prev = str(row.get("status") or "")
+        source = str(item.get("source") or "")
         self._hook(
             "file_start",
             {
                 "id": task_id,
                 "title": item.get("title") or "",
-                "source": item.get("source") or "",
+                "source": source,
                 "issuer": name,
             },
         )
         try:
-            client = self.cm if item.get("source") == "chinamoney" else self.cb
+            client = self.cm if source == "chinamoney" else self.cb
             data, remote_name = client.download(item)
             ext = guess_ext(item.get("suffix") or Path(str(remote_name)).suffix, data)
             if dest.suffix.lower() != f".{ext}":
@@ -424,8 +532,10 @@ class Crawler:
             row["status"] = "ok" if (ext != "pdf" or is_pdf(data)) else "not_pdf"
             if row["status"] != "ok":
                 row["error"] = "magic mismatch"
+            else:
+                row["error"] = ""
             self._write_row(row)
-            self.progress.add_download(name, job_key, "download_ok" if row["status"] == "ok" else "download_fail")
+            self._bump_download_counter(name, job_key, prev, row["status"])
             self._hook(
                 "file_done",
                 {
@@ -433,16 +543,43 @@ class Crawler:
                     "status": row["status"],
                     "path": row.get("local_path") or "",
                     "issuer": name,
+                    "source": source,
                 },
             )
             return row["status"]
         except Exception as e:
-            row["status"] = "fail"
-            row["error"] = f"{type(e).__name__}: {e}"
+            login = "login" in str(e).lower() or "locked" in str(e).lower()
+            row["status"] = "locked" if login else "fail"
+            row["error"] = "skip_login" if login else f"{type(e).__name__}: {e}"
             self._write_row(row)
+            self._bump_download_counter(name, job_key, prev, row["status"])
+            self._hook(
+                "file_done",
+                {
+                    "id": task_id,
+                    "status": row["status"],
+                    "path": "",
+                    "issuer": name,
+                    "source": source,
+                },
+            )
+            return row["status"]
+
+    def _bump_download_counter(self, name: str, job_key: str, prev: str, now: str) -> None:
+        if prev == now:
+            if now == "ok":
+                return
+        if prev == "fail":
+            self.progress.add_download(name, job_key, "download_fail", -1)
+        elif prev == "locked":
+            self.progress.add_download(name, job_key, "locked", -1)
+        if now == "ok":
+            if prev != "ok":
+                self.progress.add_download(name, job_key, "download_ok")
+        elif now == "locked":
+            self.progress.add_download(name, job_key, "locked")
+        else:
             self.progress.add_download(name, job_key, "download_fail")
-            self._hook("file_done", {"id": task_id, "status": "fail", "path": "", "issuer": name})
-            return "fail"
 
     def _to_row(self, seq: int, name: str, item: dict[str, Any]) -> dict[str, Any]:
         return {

@@ -88,7 +88,7 @@ class Progress:
     def add_download(self, issuer: str, job_key: str, field: str, n: int = 1) -> None:
         with self._lock:
             job = self.job(issuer, job_key)
-            job[field] = int(job.get(field) or 0) + n
+            job[field] = max(0, int(job.get(field) or 0) + n)
             self._save_unlocked()
 
     def mark_issuer(self, issuer: str, status: str) -> None:

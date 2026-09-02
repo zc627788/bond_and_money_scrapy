@@ -8,7 +8,7 @@ import time
 from typing import Any, Iterator, Optional
 from urllib.parse import unquote
 
-from .http import UA, BrowserSession
+from .http import UA, BrowserSession, _looks_like_login
 from .util import guess_agency, is_pdf, today_str
 
 HOME = "https://www.chinamoney.com.cn/chinese/pjgg/"
@@ -148,7 +148,7 @@ class ChinaMoneyClient:
     def download(self, item: dict[str, Any]) -> tuple[bytes, str]:
         self.ensure()
         url = item["pdf_url"]
-        resp = self.http.get(
+        resp = self.http.get_file(
             url,
             headers={
                 "User-Agent": UA,
@@ -157,10 +157,11 @@ class ChinaMoneyClient:
                 "Referer": HOME,
             },
             warmup=self.warmup,
-            timeout=90,
         )
         data = resp.content or b""
         filename = _filename_from_cd(resp.headers.get("content-disposition", "")) or ""
+        if _looks_like_login(resp):
+            raise RuntimeError("login required")
         if resp.status_code != 200 or not data:
             raise RuntimeError(f"download failed {resp.status_code} {url}")
         if not is_pdf(data) and (item.get("suffix") == "pdf"):

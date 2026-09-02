@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Iterator, Optional
 from urllib.parse import urljoin
 
-from .http import UA, BrowserSession
+from .http import UA, BrowserSession, _looks_like_login
 from .util import guess_agency, is_pdf, today_str
 
 HOME = "https://www.chinabond.com.cn/xxpl/ywzc_fxyfxdh/fxyfxdh_zqzl/"
@@ -182,8 +182,8 @@ class ChinaBondClient:
         if not url:
             raise RuntimeError("no pdf url")
         if item.get("locked"):
-            raise RuntimeError("locked skipped")
-        resp = self.http.get(
+            raise RuntimeError("login required")
+        resp = self.http.get_file(
             url,
             headers={
                 "User-Agent": UA,
@@ -192,9 +192,10 @@ class ChinaBondClient:
                 "Referer": item.get("detail_url") or HOME,
             },
             warmup=self.warmup,
-            timeout=90,
         )
         data = resp.content or b""
+        if _looks_like_login(resp):
+            raise RuntimeError("login required")
         if resp.status_code != 200 or not data:
             raise RuntimeError(f"download failed {resp.status_code} {url}")
         if item.get("suffix") == "pdf" and not is_pdf(data):
