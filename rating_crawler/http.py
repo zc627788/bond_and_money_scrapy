@@ -90,6 +90,7 @@ class BrowserSession:
     ) -> creq.Response:
         last_exc: Optional[Exception] = None
         last_resp: Optional[creq.Response] = None
+        budget = str(kwargs.pop("budget", "api") or "api")
         kinds = _attempt_kinds(
             has_pool=bool(self.proxy_pool),
             proxy_tries=self.max_retries if proxy_tries is None else proxy_tries,
@@ -103,6 +104,9 @@ class BrowserSession:
             proxy_url = ProxyPool.as_url(proxy) if use_proxy else None
             nxt = kinds[attempt] if attempt < total_tries else ""
             bad_lease = False
+            timeout_s = float(timeout)
+            if use_proxy and self.proxy_pool and proxy:
+                timeout_s = float(self.proxy_pool.timeout_for(proxy, budget))
             info = {
                 "event": "try",
                 "kind": kind,
@@ -110,6 +114,7 @@ class BrowserSession:
                 "total": total_tries,
                 "proxy": proxy or "",
                 "next_kind": nxt,
+                "timeout": timeout_s,
                 "status": "proxy" if kind == "proxy" else "direct",
                 "label": format_attempt(
                     event="try",
@@ -117,6 +122,7 @@ class BrowserSession:
                     attempt=attempt,
                     total=total_tries,
                     proxy=proxy or "",
+                    limit=timeout_s,
                 ),
             }
             self._notify(info)
@@ -132,13 +138,15 @@ class BrowserSession:
                 extra.pop("on_attempt", None)
                 if proxy_url:
                     extra["proxy"] = proxy_url
+                t0 = time.perf_counter()
                 resp = self._session().request(
                     method,
                     url,
                     headers=headers,
-                    timeout=timeout,
+                    timeout=timeout_s,
                     **extra,
                 )
+                elapsed = time.perf_counter() - t0
                 last_resp = resp
                 if _looks_like_login(resp):
                     info = {
@@ -215,6 +223,8 @@ class BrowserSession:
                     if warmup is not None:
                         warmup(self)
                     continue
+                if self.proxy_pool:
+                    self.proxy_pool.observe_ok(proxy if use_proxy else None, elapsed, budget)
                 return resp
             except Exception as e:
                 bad_lease = True
@@ -278,6 +288,7 @@ class BrowserSession:
         kwargs.setdefault("proxy_tries", DOWNLOAD_PROXY_TRIES)
         kwargs.setdefault("direct_tries", DOWNLOAD_DIRECT_TRIES)
         kwargs.setdefault("retry_timeouts_only", True)
+        kwargs.setdefault("budget", "download")
         return self.get(url, **kwargs)
 
 
@@ -298,6 +309,7 @@ def format_attempt(
     proxy: str = "",
     reason: str = "",
     next_kind: str = "",
+    limit: float = 0,
 ) -> str:
     ip = (proxy or "").split(":")[0] if kind == "proxy" else ""
     if kind == "proxy":
@@ -305,8 +317,9 @@ def format_attempt(
     else:
         via = "走直连"
     slot = f"{attempt}/{total}"
+    cap = f" 限{limit:.1f}s" if limit else ""
     if event == "try":
-        return f"{via} {slot}"
+        return f"{via} {slot}{cap}"
     if event == "login":
         return f"{via} {slot} · 需登录，停止"
     if next_kind == "proxy":

@@ -11,6 +11,38 @@ from curl_cffi import requests as creq
 IP_PORT = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}$")
 
 
+class LatencyBudget:
+    """用成功请求的耗时估正常值，超时 = clamp(倍数 × EWMA)。"""
+
+    def __init__(self, *, multiplier: float, min_s: float, max_s: float, cold_s: float):
+        self.multiplier = multiplier
+        self.min_s = min_s
+        self.max_s = max_s
+        self.cold_s = cold_s
+        self.ewma: dict[str, float] = {}
+        self.hits: dict[str, int] = {}
+
+    def observe(self, key: str, seconds: float) -> None:
+        if not key or seconds <= 0:
+            return
+        n = self.hits.get(key, 0)
+        if n == 0:
+            self.ewma[key] = seconds
+        else:
+            self.ewma[key] = 0.25 * seconds + 0.75 * self.ewma[key]
+        self.hits[key] = n + 1
+
+    def typical(self, key: str) -> float:
+        return float(self.ewma.get(key) or 0.0)
+
+    def timeout(self, key: str) -> float:
+        n = self.hits.get(key, 0)
+        if n < 2:
+            return self.cold_s
+        t = self.multiplier * self.ewma[key]
+        return max(self.min_s, min(self.max_s, t))
+
+
 class ProxyPool:
     """线程内粘滞：同一条代理一直用到超时/失败，再换下一条。"""
 
@@ -25,6 +57,9 @@ class ProxyPool:
         self._idx = 0
         self._fetched_at = 0.0
         self._min_fetch_gap = 15.0
+        # 实测好 IP：首页/列表约 0.4–0.8s，75KB PDF 约 0.6–1s。3 倍即切。
+        self._api = LatencyBudget(multiplier=3.0, min_s=1.5, max_s=6.0, cold_s=4.0)
+        self._dl = LatencyBudget(multiplier=3.0, min_s=3.0, max_s=12.0, cold_s=10.0)
 
     def acquire(self) -> Optional[str]:
         sticky = getattr(self._local, "proxy", None)
@@ -42,6 +77,24 @@ class ProxyPool:
     def release(self, proxy: Optional[str], *, bad: bool = False) -> None:
         if bad:
             self.report_bad(proxy)
+
+    def observe_ok(self, proxy: Optional[str], seconds: float, budget: str = "api") -> None:
+        key = proxy or "direct"
+        with self._lock:
+            self._budget(budget).observe(key, seconds)
+
+    def timeout_for(self, proxy: Optional[str], budget: str = "api") -> float:
+        key = proxy or "direct"
+        with self._lock:
+            return self._budget(budget).timeout(key)
+
+    def typical_for(self, proxy: Optional[str], budget: str = "api") -> float:
+        key = proxy or "direct"
+        with self._lock:
+            return self._budget(budget).typical(key)
+
+    def _budget(self, budget: str) -> LatencyBudget:
+        return self._dl if budget == "download" else self._api
 
     def report_bad(self, proxy: Optional[str]) -> None:
         if not proxy:
