@@ -119,7 +119,24 @@ class Crawler:
         todo = []
         for seq, name in issuers:
             if resume and self.progress.is_done(name):
-                self.log(f"[skip] {seq} {name} already done")
+                counts = self._issuer_file_counts(name)
+                extra = f"，已有 {counts['ok']} 个文件" if counts["ok"] else "，此前无文件"
+                if counts["fail"]:
+                    extra += f"，失败 {counts['fail']}"
+                if counts["locked"]:
+                    extra += f"，锁定 {counts['locked']}"
+                self.log(f"[skip] {seq} {name} already done{extra}")
+                self._hook(
+                    "skipped",
+                    {
+                        "seq": seq,
+                        "name": name,
+                        "ok": counts["ok"],
+                        "fail": counts["fail"],
+                        "skip": counts["skip"],
+                        "locked": counts["locked"],
+                    },
+                )
                 continue
             todo.append((seq, name))
         n = max(1, min(self.issuer_workers, len(todo) or 1))
@@ -135,11 +152,16 @@ class Crawler:
             try:
                 complete = self._run_one(seq, name, sources=sources, download=download)
                 self.progress.mark_issuer(name, "done" if complete else "failed")
+                self._hook(
+                    "issuer",
+                    {"seq": seq, "name": name, "phase": "done" if complete else "failed"},
+                )
                 if not complete:
                     self.log(f"  [{seq}] 未全部完成，已写入断点，下次续跑")
             except Exception as e:
                 self.log(f"  [fail] {seq} {name}: {type(e).__name__}: {e}")
                 self.progress.mark_issuer(name, "failed")
+                self._hook("issuer", {"seq": seq, "name": name, "phase": "failed"})
             self._flush_tables()
 
         if not todo:
@@ -189,6 +211,15 @@ class Crawler:
         if download:
             self._download_many(name, pending)
         return self._lists_complete(name, sources)
+
+    def _issuer_file_counts(self, name: str) -> dict[str, int]:
+        jobs = (self.progress.snapshot(name).get("jobs") or {}).values()
+        return {
+            "ok": sum(int(j.get("download_ok") or 0) for j in jobs),
+            "fail": sum(int(j.get("download_fail") or 0) for j in jobs),
+            "skip": sum(int(j.get("download_skip") or 0) for j in jobs),
+            "locked": sum(int(j.get("locked") or 0) for j in jobs),
+        }
 
     def _lists_complete(self, name: str, sources: tuple[str, ...]) -> bool:
         jobs = (self.progress.snapshot(name).get("jobs") or {})

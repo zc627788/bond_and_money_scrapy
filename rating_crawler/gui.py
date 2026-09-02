@@ -11,7 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from .names import load_issuer_csv, parse_manual_names
 from .pipeline import Crawler
-from .util import app_root, bundled_root, load_json
+from .util import app_root, bundled_root, load_json, today_str
 
 DEFAULT_PROXY = (
     "http://58ip.top/api/get?token=9e5d4546c8092014354afd46897b1e"
@@ -33,8 +33,8 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("评级报告抓取")
-        self.geometry("820x620")
-        self.minsize(720, 520)
+        self.geometry("860x700")
+        self.minsize(760, 600)
         self.root_dir = app_root()
         self.bundle_dir = bundled_root()
         self.cfg_path = self.bundle_dir / "config" / "settings.json"
@@ -84,6 +84,8 @@ class App(tk.Tk):
         self.proxy = tk.StringVar(value=DEFAULT_PROXY)
         ttk.Entry(proxy_fr, textvariable=self.proxy).pack(side="left", fill="x", expand=True, padx=6)
 
+        self._build_fixed_params()
+
         btn = ttk.Frame(self)
         btn.pack(fill="x", **pad)
         self.btn_start = ttk.Button(btn, text="开始", command=self.start)
@@ -103,10 +105,43 @@ class App(tk.Tk):
         self.tree.heading("progress", text="进度")
         self.tree.heading("current", text="当前文件")
         self.tree.column("name", width=240, stretch=False)
-        self.tree.column("progress", width=110, stretch=False)
+        self.tree.column("progress", width=150, stretch=False)
         self.tree.column("current", width=420)
+        self.tree.tag_configure("skipped", foreground="#666")
+        self.tree.tag_configure("queued", foreground="#888")
         self.tree.pack(fill="both", expand=True, padx=12, pady=6)
         self._refresh_count()
+
+    def _build_fixed_params(self) -> None:
+        box = ttk.LabelFrame(self, text="本次查询（固定，不可改）")
+        box.pack(fill="x", padx=12, pady=(4, 2))
+        box.columnconfigure(1, weight=1)
+        box.columnconfigure(3, weight=1)
+
+        cm = self.settings.get("chinamoney") or {}
+        cb = self.settings.get("chinabond") or {}
+        start = str(cm.get("start_date") or cb.get("start_date") or "1990-01-01")
+        cats = [str(c.get("label") or "") for c in (cm.get("categories") or []) if c.get("label")]
+        if not cats:
+            cats = ["债项评级报告", "主体评级报告", "重点关注"]
+        bond_tag = str(cb.get("child_chnl_desc") or "评级文件")
+        if bond_tag and bond_tag not in cats:
+            cats.append(bond_tag)
+
+        self._fixed_vars: dict[str, tk.StringVar] = {}
+
+        def _field(r: int, c: int, label: str, value: str, span: int = 1) -> None:
+            ttk.Label(box, text=label).grid(row=r, column=c * 2, sticky="e", padx=(8, 4), pady=3)
+            var = tk.StringVar(value=value)
+            ent = ttk.Entry(box, textvariable=var, state="disabled")
+            ent.grid(row=r, column=c * 2 + 1, columnspan=span, sticky="ew", padx=(0, 8), pady=3)
+            self._fixed_vars[label] = var
+
+        _field(0, 0, "时间范围", f"{start} 至 {today_str()}（全部历史）")
+        _field(0, 1, "数据来源", "中国货币网、中国债券信息网")
+        _field(1, 0, "栏目标签", "、".join(cats), span=3)
+        _field(2, 0, "断点续跑", "开启（已完成的公司显示为「已爬取，跳过」）")
+        _field(2, 1, "需登录文件", "跳过（非公开发行企业债不下载）")
 
     def _names_in_box(self) -> list[str]:
         return [n for _, n in parse_manual_names(self.manual.get("1.0", "end"))]
@@ -189,6 +224,10 @@ class App(tk.Tk):
         self._co.clear()
         for iid in self.tree.get_children():
             self.tree.delete(iid)
+        for _, name in issuers:
+            st = self._ensure_company(name)
+            st["phase"] = "queued"
+            self._paint(name)
         self.btn_start.config(state="disabled")
         self.btn_pause.config(state="normal")
         self.btn_resume.config(state="disabled")
@@ -199,6 +238,7 @@ class App(tk.Tk):
             "listed": lambda p: self._q.put(("listed", p)),
             "file_start": lambda p: self._q.put(("file_start", p)),
             "file_done": lambda p: self._q.put(("file_done", p)),
+            "skipped": lambda p: self._q.put(("skipped", p)),
         }
         crawler = Crawler(self._settings(), self.root_dir, hooks=hooks)
         self._crawler = crawler
@@ -229,8 +269,15 @@ class App(tk.Tk):
 
     def _ensure_company(self, name: str) -> dict:
         if name not in self._co:
-            iid = self.tree.insert("", "end", values=(name, "等待", ""))
-            self._co[name] = {"iid": iid, "total": 0, "done": 0, "fail": 0, "current": ""}
+            iid = self.tree.insert("", "end", values=(name, "排队", ""), tags=("queued",))
+            self._co[name] = {
+                "iid": iid,
+                "total": 0,
+                "done": 0,
+                "fail": 0,
+                "current": "",
+                "phase": "queued",
+            }
         return self._co[name]
 
     def _paint(self, name: str) -> None:
@@ -241,23 +288,73 @@ class App(tk.Tk):
         done = int(st["done"])
         fail = int(st["fail"])
         finished = done + fail
-        if total <= 0:
-            prog = "无文件"
+        phase = st.get("phase") or "queued"
+        current = st.get("current") or ""
+        tags = ()
+        if phase == "skipped":
+            prog = f"已爬取，跳过  {done}个文件" if done else "已爬取，跳过"
+            if fail:
+                prog += f" · 失败{fail}"
+            current = current or "此前已完成，本次跳过"
+            tags = ("skipped",)
+        elif phase == "queued":
+            prog = "排队"
+            tags = ("queued",)
+        elif phase == "failed":
+            if total <= 0:
+                prog = "未完成"
+            else:
+                pct = int(finished * 100 / total) if total else 0
+                prog = f"{finished}/{total}  {pct}%"
+            current = current or "未全部完成，下次续跑"
+        elif total <= 0:
+            prog = "查询中" if phase == "running" else "无文件"
         else:
             pct = int(finished * 100 / total)
             prog = f"{finished}/{total}  {pct}%"
-        self.tree.item(st["iid"], values=(name, prog, st.get("current") or ""))
+            if phase == "done" and finished >= total and not current:
+                current = "完成"
+        self.tree.item(st["iid"], values=(name, prog, current), tags=tags)
 
     def _pump(self) -> None:
         try:
             while True:
                 kind, payload = self._q.get_nowait()
                 if kind == "issuer":
-                    self._ensure_company(payload.get("name") or "")
-                    self._paint(payload.get("name") or "")
+                    name = payload.get("name") or ""
+                    st = self._ensure_company(name)
+                    phase = payload.get("phase") or "start"
+                    if phase == "start":
+                        st["phase"] = "running"
+                        if not st.get("current"):
+                            st["current"] = "正在查询列表…"
+                    elif phase == "done":
+                        st["phase"] = "done"
+                        if st.get("current") in {"", "正在查询列表…"}:
+                            st["current"] = "完成"
+                    elif phase == "failed":
+                        st["phase"] = "failed"
+                    self._paint(name)
+                elif kind == "skipped":
+                    name = payload.get("name") or ""
+                    st = self._ensure_company(name)
+                    st["phase"] = "skipped"
+                    st["done"] = int(payload.get("ok") or 0)
+                    st["fail"] = int(payload.get("fail") or 0)
+                    locked = int(payload.get("locked") or 0)
+                    if st["done"]:
+                        st["current"] = f"此前已完成，本次跳过 · {st['done']} 个文件"
+                    else:
+                        st["current"] = "此前已完成（无文件），本次跳过"
+                    if st["fail"]:
+                        st["current"] += f" · 失败 {st['fail']}"
+                    if locked:
+                        st["current"] += f" · 锁定 {locked}"
+                    self._paint(name)
                 elif kind == "listed":
                     name = payload.get("issuer") or ""
                     st = self._ensure_company(name)
+                    st["phase"] = "running"
                     st["total"] = int(payload.get("total") or 0)
                     st["done"] = int(payload.get("done") or 0)
                     self._paint(name)
