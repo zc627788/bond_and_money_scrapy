@@ -217,7 +217,7 @@ class App(tk.Tk):
         _field(1, 0, "查询栏目", "、".join(cats), span=3)
         _field(2, 0, "已完成的", "会跳过；失败和电脑里缺的文件会再下一次")
         _field(2, 1, "要登录的文件", "不下载（多为非公开发行企业债）")
-        _field(3, 0, "网络不稳时", "自动换线路；好的线路会一直用，太慢就换下一条", span=3)
+        _field(3, 0, "网络不稳时", "查列表几秒就换；下文件至少等 20 秒、最多 90 秒，好线路会一直用", span=3)
 
     def _names_in_box(self) -> list[str]:
         return [n for _, n in parse_manual_names(self.manual.get("1.0", "end"))]

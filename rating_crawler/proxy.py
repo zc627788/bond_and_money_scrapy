@@ -57,9 +57,9 @@ class ProxyPool:
         self._idx = 0
         self._fetched_at = 0.0
         self._min_fetch_gap = 15.0
-        # 实测好 IP：首页/列表约 0.4–0.8s，75KB PDF 约 0.6–1s。3 倍即切。
+        # 列表是小 JSON，可以快切；PDF 动辄几 MB，不能用列表那套秒数。
         self._api = LatencyBudget(multiplier=3.0, min_s=1.5, max_s=6.0, cold_s=4.0)
-        self._dl = LatencyBudget(multiplier=3.0, min_s=3.0, max_s=12.0, cold_s=10.0)
+        self._dl = LatencyBudget(multiplier=4.0, min_s=20.0, max_s=90.0, cold_s=45.0)
 
     def acquire(self) -> Optional[str]:
         sticky = getattr(self._local, "proxy", None)
