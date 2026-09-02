@@ -35,46 +35,88 @@ JSONL_COLUMNS = [
     "dup_reason",
 ]
 
-# 对外 CSV：货币网 / 中债各一份
-CSV_COLUMNS = [
-    "issuer_name",
-    "query_start",
-    "query_end",
-    "category",
-    "agency",
-    "title",
-    "publish_date",
-    "detail_url",
-    "pdf_url",
-    "local_path",
-    "status",
-    "http_status",
-    "error_code",
-    "error",
-    "is_duplicate",
-    "duplicate_of",
-    "dup_reason",
-]
+STATUS_CN = {
+    "ok": "成功",
+    "fail": "失败",
+    "locked": "需登录",
+    "not_pdf": "失败",
+    "listed": "仅有目录",
+    "no_file": "无附件",
+    "empty": "无记录",
+}
+SOURCE_CN = {
+    "chinamoney": "中国货币网",
+    "chinabond": "中国债券信息网",
+}
+ERROR_TYPE_CN = {
+    "timeout": "超时",
+    "link": "链接问题",
+    "login": "登录问题",
+    "missing": "链接不存在",
+    "rate": "请求过频",
+    "server": "服务器错误",
+    "not_pdf": "不是PDF",
+    "empty": "空响应",
+    "no_url": "无下载地址",
+    "error": "其他",
+}
 
-INV_COLUMNS = [
-    "issuer_name",
-    "found_for",
-    "source",
-    "category",
-    "agency",
-    "title",
-    "publish_date",
-    "detail_url",
-    "pdf_url",
-    "local_path",
-    "status",
-    "http_status",
-    "error_code",
-    "error",
-    "is_duplicate",
-    "duplicate_of",
-    "dup_reason",
+CSV_CN = [
+    ("issuer_name", "公司名称"),
+    ("query_start", "查询起始日"),
+    ("query_end", "查询截止日"),
+    ("category", "栏目"),
+    ("agency", "评级机构"),
+    ("title", "文件标题"),
+    ("publish_date", "披露日期"),
+    ("detail_url", "网站详情页"),
+    ("pdf_url", "文件下载地址"),
+    ("local_path", "电脑里的文件"),
+    ("status_cn", "结果"),
+    ("error_type_cn", "失败类型"),
+    ("error", "失败说明"),
+    ("http_cn", "网络代码"),
+    ("dup_cn", "是否重复文件"),
+    ("dup_reason", "重复说明"),
 ]
+INV_CN = [
+    ("source_cn", "来源"),
+    ("issuer_name", "公司名称"),
+    ("found_for", "还出现在这些公司"),
+    ("category", "栏目"),
+    ("agency", "评级机构"),
+    ("title", "文件标题"),
+    ("publish_date", "披露日期"),
+    ("detail_url", "网站详情页"),
+    ("pdf_url", "文件下载地址"),
+    ("local_path", "电脑里的文件"),
+    ("status_cn", "结果"),
+    ("error_type_cn", "失败类型"),
+    ("error", "失败说明"),
+    ("http_cn", "网络代码"),
+    ("dup_cn", "是否重复文件"),
+    ("dup_reason", "重复说明"),
+]
+SUM_CN = ["来源", "总条数", "成功", "失败", "需登录", "重复文件"]
+
+README_TXT = """这个文件夹是下载结果。
+
+请先用 Excel 打开：
+  评级报告清单.xlsx
+
+里面有四张表：货币网、中债、总清单、汇总。
+
+不会用 Excel 也可以打开同名的 CSV：
+  货币网.csv
+  中债.csv
+  总清单.csv
+  汇总.csv
+
+PDF 在软件旁边的 downloads 文件夹里，按「网站 / 公司名称」分好了。
+
+下面这些是程序自己记进度用的，不用打开：
+  progress.json  records.jsonl  state.json
+"""
 
 
 def append_jsonl(path: Path, row: dict[str, Any]) -> None:
@@ -115,32 +157,94 @@ def write_tables(rows: list[dict[str, Any]], out_dir: Path, query_start: str = "
             row["error"] = ""
             row["error_code"] = ""
 
-    def to_csv(part: list[dict[str, Any]], name: str, columns: list[str]) -> None:
-        df = pd.DataFrame(part)
-        for col in columns:
-            if col not in df.columns:
-                df[col] = ""
-        df = df[columns]
-        for col in columns:
-            df[col] = df[col].fillna("").astype(str).replace({"nan": "", "None": ""})
-        df.to_csv(out_dir / name, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_ALL)
-
     money = [r for r in rows if r.get("source") == "chinamoney"]
     bond = [r for r in rows if r.get("source") == "chinabond"]
-    to_csv(money, "chinamoney.csv", CSV_COLUMNS)
-    to_csv(bond, "chinabond.csv", CSV_COLUMNS)
-    to_csv(_inventory_rows(rows), "inventory.csv", INV_COLUMNS)
+    inv = _inventory_rows(rows)
+    money_b = [_business_view(r) for r in money]
+    bond_b = [_business_view(r) for r in bond]
+    inv_b = [_business_view(r, inventory=True) for r in inv]
+    _write_cn_csv(out_dir / "货币网.csv", money_b, CSV_CN)
+    _write_cn_csv(out_dir / "中债.csv", bond_b, CSV_CN)
+    _write_cn_csv(out_dir / "总清单.csv", inv_b, INV_CN)
+    _write_cn_csv(out_dir / "chinamoney.csv", money_b, CSV_CN)
+    _write_cn_csv(out_dir / "chinabond.csv", bond_b, CSV_CN)
+    _write_cn_csv(out_dir / "inventory.csv", inv_b, INV_CN)
 
-    summary_rows = []
-    for src, part in (("chinamoney", money), ("chinabond", bond)):
-        ok = sum(1 for r in part if r.get("status") == "ok")
-        fail = sum(1 for r in part if r.get("status") == "fail")
-        locked = sum(1 for r in part if r.get("status") == "locked")
-        dup = sum(1 for r in part if str(r.get("is_duplicate")) == "1")
-        summary_rows.append(
-            {"source": src, "rows": len(part), "ok": ok, "fail": fail, "locked": locked, "duplicate": dup}
+    summary = []
+    for src, part, label in (("chinamoney", money, "中国货币网"), ("chinabond", bond, "中国债券信息网")):
+        summary.append(
+            {
+                "来源": label,
+                "总条数": len(part),
+                "成功": sum(1 for r in part if r.get("status") == "ok"),
+                "失败": sum(1 for r in part if r.get("status") in {"fail", "not_pdf"}),
+                "需登录": sum(1 for r in part if r.get("status") == "locked"),
+                "重复文件": sum(1 for r in part if str(r.get("is_duplicate")) == "1"),
+            }
         )
-    pd.DataFrame(summary_rows).to_csv(out_dir / "summary.csv", index=False, encoding="utf-8-sig")
+    sum_df = pd.DataFrame(summary)
+    sum_df.to_csv(out_dir / "汇总.csv", index=False, encoding="utf-8-sig", quoting=csv.QUOTE_ALL)
+    sum_df.to_csv(out_dir / "summary.csv", index=False, encoding="utf-8-sig", quoting=csv.QUOTE_ALL)
+    _write_xlsx(out_dir / "评级报告清单.xlsx", money_b, bond_b, inv_b, sum_df)
+    (out_dir / "请先看这里.txt").write_text(README_TXT, encoding="utf-8")
+
+
+def _business_view(row: dict[str, Any], *, inventory: bool = False) -> dict[str, Any]:
+    http_s = row.get("http_status") or 0
+    try:
+        http_n = int(http_s)
+    except (TypeError, ValueError):
+        http_n = 0
+    out = dict(row)
+    out["source_cn"] = SOURCE_CN.get(str(row.get("source") or ""), str(row.get("source") or ""))
+    out["status_cn"] = STATUS_CN.get(str(row.get("status") or ""), str(row.get("status") or ""))
+    out["error_type_cn"] = "" if row.get("status") == "ok" else ERROR_TYPE_CN.get(str(row.get("error_code") or ""), str(row.get("error_code") or ""))
+    out["http_cn"] = str(http_n) if http_n else ""
+    out["dup_cn"] = "是" if str(row.get("is_duplicate")) == "1" else "否"
+    return out
+
+
+def _write_cn_csv(path: Path, rows: list[dict[str, Any]], spec: list[tuple[str, str]]) -> None:
+    keys = [k for k, _ in spec]
+    headers = [h for _, h in spec]
+    df = pd.DataFrame(rows)
+    for k in keys:
+        if k not in df.columns:
+            df[k] = ""
+    if df.empty:
+        df = pd.DataFrame(columns=keys)
+    df = df[keys]
+    df.columns = headers
+    for col in headers:
+        df[col] = df[col].fillna("").astype(str).replace({"nan": "", "None": ""})
+    df.to_csv(path, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_ALL)
+
+
+def _write_xlsx(
+    path: Path,
+    money: list[dict[str, Any]],
+    bond: list[dict[str, Any]],
+    inv: list[dict[str, Any]],
+    summary: pd.DataFrame,
+) -> None:
+    with pd.ExcelWriter(path, engine="openpyxl") as xw:
+        def sheet(rows: list[dict[str, Any]], spec: list[tuple[str, str]], name: str) -> None:
+            keys = [k for k, _ in spec]
+            headers = [h for _, h in spec]
+            df = pd.DataFrame(rows)
+            for k in keys:
+                if k not in df.columns:
+                    df[k] = ""
+            if df.empty:
+                df = pd.DataFrame(columns=keys)
+            df = df[keys]
+            df.columns = headers
+            df.to_excel(xw, sheet_name=name, index=False)
+
+        sheet(money, CSV_CN, "货币网")
+        sheet(bond, CSV_CN, "中债")
+        sheet(inv, INV_CN, "总清单")
+        summary.to_excel(xw, sheet_name="汇总", index=False)
 
 
 def _inventory_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

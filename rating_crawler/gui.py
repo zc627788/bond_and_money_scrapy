@@ -23,8 +23,8 @@ MAX_CONCUR = 50
 FILE_STATUS = {
     "listed": "待下载",
     "downloading": "下载中",
-    "proxy": "走代理",
-    "direct": "走直连",
+    "proxy": "走线路",
+    "direct": "本机直连",
     "retry": "重试中",
     "ok": "成功",
     "fail": "失败",
@@ -46,7 +46,7 @@ def _clamp(n: int, lo: int = 1, hi: int = MAX_CONCUR) -> int:
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("评级报告抓取")
+        self.title("评级报告下载")
         self.geometry("1280x860")
         self.minsize(1040, 720)
         self.root_dir = app_root()
@@ -81,23 +81,23 @@ class App(tk.Tk):
         self.manual.bind("<KeyRelease>", lambda _e: self._refresh_count())
         ttk.Label(
             self,
-            text="可直接粘贴或导入 CSV（并集去重）。一行一个，或英文逗号分隔。",
+            text="可粘贴公司全称，或导入表格。一行一家，也可用英文逗号分开。重复的会自动去掉。",
             foreground="#888",
         ).pack(anchor="w", padx=12)
 
         opt = ttk.Frame(self)
         opt.pack(fill="x", **pad)
-        ttk.Label(opt, text="同时抓几家").pack(side="left")
+        ttk.Label(opt, text="同时查几家公司").pack(side="left")
         self.issuer_workers = tk.IntVar(value=_clamp(self.settings.get("issuer_workers", 4)))
         ttk.Spinbox(opt, from_=1, to=MAX_CONCUR, width=5, textvariable=self.issuer_workers).pack(side="left", padx=4)
-        ttk.Label(opt, text="同时下载几个").pack(side="left", padx=(16, 0))
+        ttk.Label(opt, text="同时下几个文件").pack(side="left", padx=(16, 0))
         self.workers = tk.IntVar(value=_clamp(self.settings.get("workers", 8)))
         ttk.Spinbox(opt, from_=1, to=MAX_CONCUR, width=5, textvariable=self.workers).pack(side="left", padx=4)
         ttk.Label(opt, text="上限 50", foreground="#888").pack(side="left", padx=8)
 
         proxy_fr = ttk.Frame(self)
         proxy_fr.pack(fill="x", **pad)
-        ttk.Label(proxy_fr, text="代理").pack(side="left")
+        ttk.Label(proxy_fr, text="网络代理（不懂可不动，清空=直连）").pack(side="left")
         self.proxy = tk.StringVar(value=DEFAULT_PROXY)
         ttk.Entry(proxy_fr, textvariable=self.proxy).pack(side="left", fill="x", expand=True, padx=6)
 
@@ -111,7 +111,7 @@ class App(tk.Tk):
         self.btn_pause.pack(side="left", padx=6)
         self.btn_resume = ttk.Button(btn, text="继续", command=self.resume, state="disabled")
         self.btn_resume.pack(side="left")
-        ttk.Button(btn, text="打开结果", command=self._open_out).pack(side="right")
+        ttk.Button(btn, text="打开结果文件夹", command=self._open_out).pack(side="right")
         self.status = ttk.Label(btn, text="就绪")
         self.status.pack(side="left", padx=16)
 
@@ -152,7 +152,7 @@ class App(tk.Tk):
         return tree
 
     def _make_detail(self, parent: ttk.Panedwindow) -> ttk.LabelFrame:
-        box = ttk.LabelFrame(parent, text="详情（点选上方一行：页码、待下载、成功/失败原因）")
+        box = ttk.LabelFrame(parent, text="文件明细（点选上面一家公司；双击可打开网站详情页）")
         head = ttk.Frame(box)
         head.pack(fill="x", padx=8, pady=(6, 2))
         self.detail_meta = ttk.Label(head, text="尚未选择公司", foreground="#555")
@@ -188,7 +188,7 @@ class App(tk.Tk):
         return box
 
     def _build_fixed_params(self) -> None:
-        box = ttk.LabelFrame(self, text="本次查询（固定，不可改）")
+        box = ttk.LabelFrame(self, text="本次查询范围（固定，不用改）")
         box.pack(fill="x", padx=12, pady=(4, 2))
         box.columnconfigure(1, weight=1)
         box.columnconfigure(3, weight=1)
@@ -214,10 +214,10 @@ class App(tk.Tk):
 
         _field(0, 0, "时间范围", f"{start} 至 {today_str()}（全部历史）")
         _field(0, 1, "数据来源", "中国货币网、中国债券信息网")
-        _field(1, 0, "栏目标签", "、".join(cats), span=3)
-        _field(2, 0, "断点续跑", "开启；失败和本地缺失会重下，成功文件跳过")
-        _field(2, 1, "需登录文件", "直接失败（非公开发行企业债不重试）")
-        _field(3, 0, "下载超时", "好 IP 一直用；正常约 0.5s，超过约 3 倍立刻换下一条，最多 5 次后直连", span=3)
+        _field(1, 0, "查询栏目", "、".join(cats), span=3)
+        _field(2, 0, "已完成的", "会跳过；失败和电脑里缺的文件会再下一次")
+        _field(2, 1, "要登录的文件", "不下载（多为非公开发行企业债）")
+        _field(3, 0, "网络不稳时", "自动换线路；好的线路会一直用，太慢就换下一条", span=3)
 
     def _names_in_box(self) -> list[str]:
         return [n for _, n in parse_manual_names(self.manual.get("1.0", "end"))]
@@ -416,7 +416,7 @@ class App(tk.Tk):
         tags: tuple[str, ...] = ()
         page_s = f"{page}/{pages}页" if pages else (f"第{page}页" if page else "")
         if phase == "skipped":
-            prog = f"已爬取，跳过  {done}个文件" if done else "已爬取，跳过"
+            prog = f"已完成，跳过  {done}个文件" if done else "已完成，跳过"
             current = current or "此前已完成，本次跳过"
             if locked:
                 current += f" · 锁定 {locked}"

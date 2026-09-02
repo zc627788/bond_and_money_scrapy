@@ -313,9 +313,9 @@ def format_attempt(
 ) -> str:
     ip = (proxy or "").split(":")[0] if kind == "proxy" else ""
     if kind == "proxy":
-        via = f"走代理 {ip}".strip() if ip else "走代理"
+        via = f"线路 {ip}".strip() if ip else "线路"
     else:
-        via = "走直连"
+        via = "本机直连"
     slot = f"{attempt}/{total}"
     cap = f" 限{limit:.1f}s" if limit else ""
     if event == "try":
@@ -323,9 +323,9 @@ def format_attempt(
     if event == "login":
         return f"{via} {slot} · 需登录，停止"
     if next_kind == "proxy":
-        action = f"换代理 {attempt + 1}/{total}"
+        action = f"换线路 {attempt + 1}/{total}"
     elif next_kind == "direct":
-        action = f"改直连 {attempt + 1}/{total}"
+        action = f"改本机直连 {attempt + 1}/{total}"
     else:
         action = "已用尽"
     why = reason or "失败"
