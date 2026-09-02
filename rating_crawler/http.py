@@ -17,7 +17,7 @@ UA = (
 )
 IMPERSONATE = "chrome131"
 DOWNLOAD_TIMEOUT = 10
-DOWNLOAD_PROXY_TRIES = 2
+DOWNLOAD_PROXY_TRIES = 5
 DOWNLOAD_DIRECT_TRIES = 1
 
 
@@ -102,6 +102,7 @@ class BrowserSession:
             proxy = self.proxy_pool.acquire() if use_proxy else None
             proxy_url = ProxyPool.as_url(proxy) if use_proxy else None
             nxt = kinds[attempt] if attempt < total_tries else ""
+            bad_lease = False
             info = {
                 "event": "try",
                 "kind": kind,
@@ -169,6 +170,7 @@ class BrowserSession:
                     resp.status_code == 200 and not resp.content
                 )
                 if bad or resp.status_code >= 500:
+                    bad_lease = True
                     reason = "空响应" if resp.status_code == 200 and not resp.content else f"HTTP {resp.status_code}"
                     info = {
                         "event": "retry",
@@ -195,8 +197,6 @@ class BrowserSession:
                             on_attempt(info)
                         except Exception:
                             pass
-                    if self.proxy_pool and use_proxy:
-                        self.proxy_pool.report_bad(proxy)
                     if retry_timeouts_only:
                         if attempt == total_tries:
                             return resp
@@ -217,6 +217,7 @@ class BrowserSession:
                     continue
                 return resp
             except Exception as e:
+                bad_lease = True
                 last_exc = e
                 reason = "超时" if _timeout_like(e) else f"{type(e).__name__}"
                 info = {
@@ -246,8 +247,6 @@ class BrowserSession:
                         pass
                 if retry_timeouts_only and not _timeout_like(e):
                     raise
-                if self.proxy_pool and use_proxy:
-                    self.proxy_pool.report_bad(proxy)
                 self._rebuild()
                 if warmup is not None:
                     try:
@@ -256,6 +255,12 @@ class BrowserSession:
                         pass
                 if attempt == total_tries:
                     break
+            finally:
+                if self.proxy_pool and proxy:
+                    if bad_lease:
+                        self.proxy_pool.report_bad(proxy)
+                    else:
+                        self.proxy_pool.release(proxy)
         if last_resp is not None:
             return last_resp
         if last_exc:

@@ -384,6 +384,7 @@ class Crawler:
                     "category": category or str(it.get("category") or ""),
                     "page": page,
                     "status": status,
+                    "url": str(it.get("pdf_url") or ""),
                 }
             )
         return out
@@ -712,6 +713,7 @@ class Crawler:
                 "category": item.get("category") or "",
                 "page": int(item.get("_page") or 0),
                 "status": "downloading",
+                "url": item.get("pdf_url") or "",
             },
         )
         http = self._bind_progress(
@@ -721,6 +723,7 @@ class Crawler:
             title=item.get("title") or "",
             category=item.get("category") or "",
             page=int(item.get("_page") or 0),
+            url=item.get("pdf_url") or "",
             scope="download",
         )
         try:
@@ -753,6 +756,7 @@ class Crawler:
                     "category": item.get("category") or "",
                     "page": int(item.get("_page") or 0),
                     "error": row.get("error") or "",
+                    "url": item.get("pdf_url") or "",
                 },
             )
             return row["status"]
@@ -774,6 +778,7 @@ class Crawler:
                     "category": item.get("category") or "",
                     "page": int(item.get("_page") or 0),
                     "error": row.get("error") or "",
+                    "url": item.get("pdf_url") or "",
                 },
             )
             return row["status"]
@@ -802,6 +807,7 @@ class Crawler:
                 "category": item.get("category") or "",
                 "page": int(item.get("_page") or 0),
                 "error": error,
+                "url": item.get("pdf_url") or "",
             },
         )
 

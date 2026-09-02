@@ -152,9 +152,13 @@ class App(tk.Tk):
 
     def _make_detail(self, parent: ttk.Panedwindow) -> ttk.LabelFrame:
         box = ttk.LabelFrame(parent, text="详情（点选上方一行：页码、待下载、成功/失败原因）")
-        self.detail_meta = ttk.Label(box, text="尚未选择公司", foreground="#555")
-        self.detail_meta.pack(anchor="w", padx=8, pady=(6, 2))
-        cols = ("title", "category", "page", "status", "error")
+        head = ttk.Frame(box)
+        head.pack(fill="x", padx=8, pady=(6, 2))
+        self.detail_meta = ttk.Label(head, text="尚未选择公司", foreground="#555")
+        self.detail_meta.pack(side="left")
+        ttk.Button(head, text="复制选中链接", command=self._copy_selected_url).pack(side="right")
+        ttk.Button(head, text="复制全部失败链接", command=self._copy_failed_urls).pack(side="right", padx=6)
+        cols = ("title", "category", "page", "status", "error", "url")
         wrap = ttk.Frame(box)
         wrap.pack(fill="both", expand=True, padx=6, pady=(0, 6))
         self.detail = ttk.Treeview(wrap, columns=cols, show="headings", height=7)
@@ -163,11 +167,13 @@ class App(tk.Tk):
         self.detail.heading("page", text="页")
         self.detail.heading("status", text="状态")
         self.detail.heading("error", text="失败原因")
-        self.detail.column("title", width=360)
-        self.detail.column("category", width=110, stretch=False)
-        self.detail.column("page", width=50, stretch=False)
-        self.detail.column("status", width=90, stretch=False)
-        self.detail.column("error", width=280)
+        self.detail.heading("url", text="链接")
+        self.detail.column("title", width=240)
+        self.detail.column("category", width=100, stretch=False)
+        self.detail.column("page", width=40, stretch=False)
+        self.detail.column("status", width=80, stretch=False)
+        self.detail.column("error", width=180, stretch=False)
+        self.detail.column("url", width=280)
         self.detail.tag_configure("fail", foreground="#a40000")
         self.detail.tag_configure("ok", foreground="#1a7f37")
         self.detail.tag_configure("skip", foreground="#666")
@@ -176,6 +182,9 @@ class App(tk.Tk):
         self.detail.configure(yscrollcommand=vsb.set)
         self.detail.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
+        self.detail.bind("<Control-c>", lambda _e: self._copy_selected_url())
+        self.detail.bind("<Double-1>", lambda _e: self._copy_selected_url())
+        self.detail.bind("<Button-3>", self._detail_menu)
         return box
 
     def _build_fixed_params(self) -> None:
@@ -208,7 +217,7 @@ class App(tk.Tk):
         _field(1, 0, "栏目标签", "、".join(cats), span=3)
         _field(2, 0, "断点续跑", "开启；失败和本地缺失会重下，成功文件跳过")
         _field(2, 1, "需登录文件", "直接失败（非公开发行企业债不重试）")
-        _field(3, 0, "下载超时", "10 秒；不通则换 2 次代理，再直连，每次都是 10 秒", span=3)
+        _field(3, 0, "下载超时", "10 秒；5 次不同代理再直连，每次 10 秒；同一 IP 同时只给一条请求", span=3)
 
     def _names_in_box(self) -> list[str]:
         return [n for _, n in parse_manual_names(self.manual.get("1.0", "end"))]
@@ -692,6 +701,7 @@ class App(tk.Tk):
                 "page": payload.get("page") if payload.get("page") not in (None, "") else rec.get("page") or "",
                 "status": payload.get("status") or rec.get("status") or "listed",
                 "error": payload.get("error") or rec.get("error") or "",
+                "url": payload.get("url") or payload.get("pdf_url") or rec.get("url") or "",
             }
         )
         store[fid] = rec
@@ -777,9 +787,55 @@ class App(tk.Tk):
                     page_s,
                     FILE_STATUS.get(status, status),
                     str(f.get("error") or "")[:120],
+                    str(f.get("url") or ""),
                 ),
                 tags=(tag,) if tag else (),
             )
+
+    def _copy_text(self, text: str, ok_msg: str) -> None:
+        text = (text or "").strip()
+        if not text:
+            self.status.config(text="没有可复制的链接")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.status.config(text=ok_msg)
+
+    def _selected_detail_url(self) -> str:
+        sel = self.detail.selection()
+        if not sel:
+            return ""
+        vals = self.detail.item(sel[0], "values")
+        if not vals or len(vals) < 6:
+            return ""
+        return str(vals[5] or "").strip()
+
+    def _copy_selected_url(self) -> None:
+        url = self._selected_detail_url()
+        self._copy_text(url, "已复制选中链接")
+
+    def _copy_failed_urls(self) -> None:
+        urls: list[str] = []
+        seen: set[str] = set()
+        for iid in self.detail.get_children():
+            vals = self.detail.item(iid, "values")
+            if not vals or len(vals) < 6:
+                continue
+            status = str(vals[3] or "")
+            url = str(vals[5] or "").strip()
+            if status == "失败" and url and url not in seen:
+                seen.add(url)
+                urls.append(url)
+        self._copy_text("\n".join(urls), f"已复制 {len(urls)} 条失败链接")
+
+    def _detail_menu(self, event) -> None:
+        row = self.detail.identify_row(event.y)
+        if row:
+            self.detail.selection_set(row)
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="复制选中链接", command=self._copy_selected_url)
+        menu.add_command(label="复制全部失败链接", command=self._copy_failed_urls)
+        menu.tk_popup(event.x_root, event.y_root)
 
     def _open_out(self) -> None:
         path = self.root_dir / "output"

@@ -1,6 +1,6 @@
 {
   "delay_seconds": 0,
-  "max_retries": 4,
+  "max_retries": 5,
   "workers": 8,
   "issuer_workers": 4,
   "download_dir": "downloads",
