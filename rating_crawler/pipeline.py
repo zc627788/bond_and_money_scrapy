@@ -184,12 +184,32 @@ class Crawler:
                 try:
                     pending.extend(self._list_chinamoney(seq, name, cat))
                 except Exception as e:
-                    self.log(f"  chinamoney {cat.get('label')} 列表失败，稍后断点续: {type(e).__name__}: {e}")
+                    err = f"{type(e).__name__}: {e}"
+                    self.log(f"  chinamoney {cat.get('label')} 列表失败，稍后断点续: {err}")
+                    self._hook(
+                        "list_error",
+                        {
+                            "issuer": name,
+                            "source": "chinamoney",
+                            "category": str(cat.get("label") or ""),
+                            "error": err,
+                        },
+                    )
         if "chinabond" in sources:
             try:
                 pending.extend(self._list_chinabond(seq, name))
             except Exception as e:
-                self.log(f"  chinabond 列表失败，稍后断点续: {type(e).__name__}: {e}")
+                err = f"{type(e).__name__}: {e}"
+                self.log(f"  chinabond 列表失败，稍后断点续: {err}")
+                self._hook(
+                    "list_error",
+                    {
+                        "issuer": name,
+                        "source": "chinabond",
+                        "category": "评级文件",
+                        "error": err,
+                    },
+                )
 
         if not pending:
             snap = self.progress.snapshot(name)
@@ -205,13 +225,31 @@ class Crawler:
                     }
                 )
             for src in sources:
-                self._hook("listed", {"issuer": name, "source": src, "total": 0, "done": 0, "skip": 0, "locked": 0, "missing": 0, "retry": 0})
+                if self._source_list_complete(name, src):
+                    self._hook(
+                        "listed",
+                        {
+                            "issuer": name,
+                            "source": src,
+                            "total": 0,
+                            "done": 0,
+                            "skip": 0,
+                            "locked": 0,
+                            "missing": 0,
+                            "retry": 0,
+                        },
+                    )
+                self._emit_source_done(name, src)
             return self._issuer_complete(name, sources)
 
         if download:
             for src in sources:
                 subset = [it for it in pending if it.get("source") == src]
                 self._download_many(name, subset, source=src)
+                self._emit_source_done(name, src)
+        else:
+            for src in sources:
+                self._emit_source_done(name, src)
         return self._issuer_complete(name, sources)
 
     def _issuer_file_counts(self, name: str) -> dict[str, int]:
@@ -295,15 +333,60 @@ class Crawler:
             return "retry_fail"
         return "new"
 
+    def _source_list_keys(self, source: str) -> list[str]:
+        if source == "chinamoney":
+            return [f"chinamoney|{cat.get('label')}" for cat in self.cm_categories]
+        if source == "chinabond":
+            return ["chinabond|评级文件"]
+        return []
+
+    def _source_list_complete(self, name: str, source: str) -> bool:
+        jobs = self.progress.snapshot(name).get("jobs") or {}
+        keys = self._source_list_keys(source)
+        return bool(keys) and all((jobs.get(k) or {}).get("list_done") for k in keys)
+
     def _lists_complete(self, name: str, sources: tuple[str, ...]) -> bool:
-        jobs = (self.progress.snapshot(name).get("jobs") or {})
-        need = []
-        if "chinamoney" in sources:
-            for cat in self.cm_categories:
-                need.append(f"chinamoney|{cat.get('label')}")
-        if "chinabond" in sources:
-            need.append("chinabond|评级文件")
-        return all((jobs.get(k) or {}).get("list_done") for k in need)
+        return all(self._source_list_complete(name, src) for src in sources)
+
+    def _emit_source_done(self, name: str, source: str) -> None:
+        list_ok = self._source_list_complete(name, source)
+        stats = self._source_disk_stats(name, source)
+        if not list_ok:
+            phase = "failed"
+        elif stats["need"]:
+            phase = "failed"
+        elif stats["ok"] or stats["locked"]:
+            phase = "done"
+        else:
+            phase = "empty"
+        self._hook(
+            "source_done",
+            {
+                "issuer": name,
+                "source": source,
+                "phase": phase,
+                "ok": stats["ok"],
+                "fail": stats["fail"],
+                "locked": stats["locked"],
+            },
+        )
+
+    def _brief_items(self, items: list[dict[str, Any]], *, page: int, category: str) -> list[dict[str, Any]]:
+        out = []
+        for it in items:
+            status = "locked" if it.get("locked") else "listed"
+            if not it.get("pdf_url") and status != "locked":
+                status = "no_file"
+            out.append(
+                {
+                    "id": str(it.get("content_id") or ""),
+                    "title": str(it.get("title") or "")[:100],
+                    "category": category or str(it.get("category") or ""),
+                    "page": page,
+                    "status": status,
+                }
+            )
+        return out
 
     def _list_chinamoney(self, seq: int, name: str, cat: dict[str, Any]) -> list[dict[str, Any]]:
         label = str(cat.get("label") or "债项评级报告")
@@ -312,10 +395,31 @@ class Crawler:
         out: list[dict[str, Any]] = []
         if job.get("list_done"):
             self.log(f"  chinamoney {label} 列表已完成 total={job.get('list_total')} listed={job.get('listed')}")
-            return self._pending_from_index(name, "chinamoney", label)
+            cached = self._pending_from_index(name, "chinamoney", label)
+            pages = int(job.get("list_pages") or 0)
+            self._hook(
+                "list_done",
+                {
+                    "issuer": name,
+                    "source": "chinamoney",
+                    "category": label,
+                    "cached": True,
+                    "page": pages,
+                    "pages": pages,
+                    "total": int(job.get("list_total") or 0),
+                    "items": self._brief_items(cached, page=pages, category=label),
+                },
+            )
+            return cached
         start_page = int(job.get("next_page") or 1)
         self.log(f"  chinamoney {label} 从第 {start_page} 页 ...")
+        self._hook(
+            "list_start",
+            {"issuer": name, "source": "chinamoney", "category": label, "page": start_page, "pages": 0},
+        )
         last_total = 0
+        last_page = start_page
+        last_pages = 0
         for pack in self.cm.iter_pages(
             name,
             scnd=str(cat["scnd"]),
@@ -338,6 +442,8 @@ class Crawler:
                 added += 1
                 out.append({**item, "_row": row})
             last_total = pack["total"]
+            last_page = pack["page"]
+            last_pages = pack["pages"]
             self.progress.mark_page(
                 name,
                 job_key,
@@ -349,7 +455,33 @@ class Crawler:
             self.log(
                 f"    页 {pack['page']}/{pack['pages']} 本页新 {added} 条，接口总数 {pack['total']}"
             )
+            for it in pack["items"]:
+                it["_page"] = pack["page"]
+            self._hook(
+                "list_page",
+                {
+                    "issuer": name,
+                    "source": "chinamoney",
+                    "category": label,
+                    "page": pack["page"],
+                    "pages": pack["pages"],
+                    "total": pack["total"],
+                    "added": added,
+                    "items": self._brief_items(pack["items"], page=pack["page"], category=label),
+                },
+            )
         self.progress.mark_list_done(name, job_key, last_total)
+        self._hook(
+            "list_done",
+            {
+                "issuer": name,
+                "source": "chinamoney",
+                "category": label,
+                "page": last_page,
+                "pages": last_pages,
+                "total": last_total,
+            },
+        )
         return out
 
     def _list_chinabond(self, seq: int, name: str) -> list[dict[str, Any]]:
@@ -358,10 +490,31 @@ class Crawler:
         out: list[dict[str, Any]] = []
         if job.get("list_done"):
             self.log(f"  chinabond 评级文件 列表已完成 total={job.get('list_total')} listed={job.get('listed')}")
-            return self._pending_from_index(name, "chinabond", "评级文件")
+            cached = self._pending_from_index(name, "chinabond", "评级文件")
+            pages = int(job.get("list_pages") or 0)
+            self._hook(
+                "list_done",
+                {
+                    "issuer": name,
+                    "source": "chinabond",
+                    "category": "评级文件",
+                    "cached": True,
+                    "page": pages,
+                    "pages": pages,
+                    "total": int(job.get("list_total") or 0),
+                    "items": self._brief_items(cached, page=pages, category="评级文件"),
+                },
+            )
+            return cached
         start_page = int(job.get("next_page") or 1)
         self.log(f"  chinabond 评级文件 从第 {start_page} 页 ...")
+        self._hook(
+            "list_start",
+            {"issuer": name, "source": "chinabond", "category": "评级文件", "page": start_page, "pages": 0},
+        )
         last_total = 0
+        last_page = start_page
+        last_pages = 0
         for pack in self.cb.iter_pages(name, start_page=start_page, max_pages=self.max_pages):
             self.wait_if_paused()
             added = 0
@@ -383,6 +536,8 @@ class Crawler:
                 if item.get("locked"):
                     self.progress.add_download(name, job_key, "locked")
             last_total = pack["total"]
+            last_page = pack["page"]
+            last_pages = pack["pages"]
             self.progress.mark_page(
                 name,
                 job_key,
@@ -394,7 +549,33 @@ class Crawler:
             self.log(
                 f"    页 {pack['page']}/{pack['pages']} 本页新 {added} 条，接口总数 {pack['total']}"
             )
+            for it in pack["items"]:
+                it["_page"] = pack["page"]
+            self._hook(
+                "list_page",
+                {
+                    "issuer": name,
+                    "source": "chinabond",
+                    "category": "评级文件",
+                    "page": pack["page"],
+                    "pages": pack["pages"],
+                    "total": pack["total"],
+                    "added": added,
+                    "items": self._brief_items(pack["items"], page=pack["page"], category="评级文件"),
+                },
+            )
         self.progress.mark_list_done(name, job_key, last_total)
+        self._hook(
+            "list_done",
+            {
+                "issuer": name,
+                "source": "chinabond",
+                "category": "评级文件",
+                "page": last_page,
+                "pages": last_pages,
+                "total": last_total,
+            },
+        )
         return out
 
     def _pending_from_index(self, name: str, source: str, category: str) -> list[dict[str, Any]]:
@@ -441,11 +622,14 @@ class Crawler:
             reason = self._download_reason(name, item)
             if reason == "locked":
                 locked_n += 1
+                self._hook_file(name, item, status="locked", error="需登录，已跳过")
                 continue
             if reason == "no_url":
+                self._hook_file(name, item, status="no_file", error="无附件")
                 continue
             if reason == "exists":
                 already += 1
+                self._hook_file(name, item, status="skip", error="本地已有")
                 continue
             if reason == "exists_path":
                 dest = self._dest_path(row if row.get("issuer_name") else self._to_row(0, name, item), item)
@@ -457,6 +641,7 @@ class Crawler:
                 self._write_row(row)
                 self.progress.add_download(name, _job_key(item), "download_skip")
                 already += 1
+                self._hook_file(name, item, status="skip", error="本地已有")
                 continue
             if reason == "missing":
                 missing_n += 1
@@ -516,6 +701,9 @@ class Crawler:
                 "title": item.get("title") or "",
                 "source": source,
                 "issuer": name,
+                "category": item.get("category") or "",
+                "page": int(item.get("_page") or 0),
+                "status": "downloading",
             },
         )
         try:
@@ -544,6 +732,10 @@ class Crawler:
                     "path": row.get("local_path") or "",
                     "issuer": name,
                     "source": source,
+                    "title": item.get("title") or "",
+                    "category": item.get("category") or "",
+                    "page": int(item.get("_page") or 0),
+                    "error": row.get("error") or "",
                 },
             )
             return row["status"]
@@ -561,9 +753,29 @@ class Crawler:
                     "path": "",
                     "issuer": name,
                     "source": source,
+                    "title": item.get("title") or "",
+                    "category": item.get("category") or "",
+                    "page": int(item.get("_page") or 0),
+                    "error": row.get("error") or "",
                 },
             )
             return row["status"]
+
+    def _hook_file(self, name: str, item: dict[str, Any], *, status: str, error: str = "") -> None:
+        self._hook(
+            "file_done",
+            {
+                "id": str(item.get("content_id") or ""),
+                "status": status,
+                "path": "",
+                "issuer": name,
+                "source": item.get("source") or "",
+                "title": item.get("title") or "",
+                "category": item.get("category") or "",
+                "page": int(item.get("_page") or 0),
+                "error": error,
+            },
+        )
 
     def _bump_download_counter(self, name: str, job_key: str, prev: str, now: str) -> None:
         if prev == now:
