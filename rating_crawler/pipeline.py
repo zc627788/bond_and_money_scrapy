@@ -420,69 +420,73 @@ class Crawler:
         last_total = 0
         last_page = start_page
         last_pages = 0
-        for pack in self.cm.iter_pages(
-            name,
-            scnd=str(cat["scnd"]),
-            channel_path=str(cat["channel_path"]),
-            label=label,
-            start_page=start_page,
-            max_pages=self.max_pages,
-        ):
-            self.wait_if_paused()
-            added = 0
-            for item in pack["items"]:
-                row = self._to_row(seq, name, item)
-                key = _row_key(row)
-                prev = self._index.get(key) if key else None
-                if prev and prev.get("status") in {"ok", "listed", "locked", "no_file"}:
-                    out.append({**item, "_row": prev})
-                    continue
-                row["status"] = "listed"
-                self._write_row(row)
-                added += 1
-                out.append({**item, "_row": row})
-            last_total = pack["total"]
-            last_page = pack["page"]
-            last_pages = pack["pages"]
-            self.progress.mark_page(
+        http = self._bind_progress("chinamoney", issuer=name, category=label, scope="list")
+        try:
+            for pack in self.cm.iter_pages(
                 name,
-                job_key,
-                page=pack["page"],
-                total=pack["total"],
-                pages=pack["pages"],
-                added=added,
-            )
-            self.log(
-                f"    页 {pack['page']}/{pack['pages']} 本页新 {added} 条，接口总数 {pack['total']}"
-            )
-            for it in pack["items"]:
-                it["_page"] = pack["page"]
+                scnd=str(cat["scnd"]),
+                channel_path=str(cat["channel_path"]),
+                label=label,
+                start_page=start_page,
+                max_pages=self.max_pages,
+            ):
+                self.wait_if_paused()
+                added = 0
+                for item in pack["items"]:
+                    row = self._to_row(seq, name, item)
+                    key = _row_key(row)
+                    prev = self._index.get(key) if key else None
+                    if prev and prev.get("status") in {"ok", "listed", "locked", "no_file"}:
+                        out.append({**item, "_row": prev})
+                        continue
+                    row["status"] = "listed"
+                    self._write_row(row)
+                    added += 1
+                    out.append({**item, "_row": row})
+                last_total = pack["total"]
+                last_page = pack["page"]
+                last_pages = pack["pages"]
+                self.progress.mark_page(
+                    name,
+                    job_key,
+                    page=pack["page"],
+                    total=pack["total"],
+                    pages=pack["pages"],
+                    added=added,
+                )
+                self.log(
+                    f"    页 {pack['page']}/{pack['pages']} 本页新 {added} 条，接口总数 {pack['total']}"
+                )
+                for it in pack["items"]:
+                    it["_page"] = pack["page"]
+                self._hook(
+                    "list_page",
+                    {
+                        "issuer": name,
+                        "source": "chinamoney",
+                        "category": label,
+                        "page": pack["page"],
+                        "pages": pack["pages"],
+                        "total": pack["total"],
+                        "added": added,
+                        "items": self._brief_items(pack["items"], page=pack["page"], category=label),
+                    },
+                )
+            self.progress.mark_list_done(name, job_key, last_total)
             self._hook(
-                "list_page",
+                "list_done",
                 {
                     "issuer": name,
                     "source": "chinamoney",
                     "category": label,
-                    "page": pack["page"],
-                    "pages": pack["pages"],
-                    "total": pack["total"],
-                    "added": added,
-                    "items": self._brief_items(pack["items"], page=pack["page"], category=label),
+                    "page": last_page,
+                    "pages": last_pages,
+                    "total": last_total,
                 },
             )
-        self.progress.mark_list_done(name, job_key, last_total)
-        self._hook(
-            "list_done",
-            {
-                "issuer": name,
-                "source": "chinamoney",
-                "category": label,
-                "page": last_page,
-                "pages": last_pages,
-                "total": last_total,
-            },
-        )
-        return out
+            return out
+        finally:
+            http.bind_progress(None)
 
     def _list_chinabond(self, seq: int, name: str) -> list[dict[str, Any]]:
         job_key = "chinabond|评级文件"
@@ -515,68 +519,72 @@ class Crawler:
         last_total = 0
         last_page = start_page
         last_pages = 0
-        for pack in self.cb.iter_pages(name, start_page=start_page, max_pages=self.max_pages):
-            self.wait_if_paused()
-            added = 0
-            for item in pack["items"]:
-                row = self._to_row(seq, name, item)
-                if item.get("locked"):
-                    row["status"] = "locked"
-                    row["error"] = "skip_login"
-                else:
-                    row["status"] = "listed" if item.get("pdf_url") else "no_file"
-                key = _row_key(row)
-                prev = self._index.get(key) if key else None
-                if prev and prev.get("status") in {"ok", "listed", "locked", "no_file"}:
-                    out.append({**item, "_row": prev})
-                    continue
-                self._write_row(row)
-                added += 1
-                out.append({**item, "_row": row})
-                if item.get("locked"):
-                    self.progress.add_download(name, job_key, "locked")
-            last_total = pack["total"]
-            last_page = pack["page"]
-            last_pages = pack["pages"]
-            self.progress.mark_page(
-                name,
-                job_key,
-                page=pack["page"],
-                total=pack["total"],
-                pages=pack["pages"],
-                added=added,
-            )
-            self.log(
-                f"    页 {pack['page']}/{pack['pages']} 本页新 {added} 条，接口总数 {pack['total']}"
-            )
-            for it in pack["items"]:
-                it["_page"] = pack["page"]
+        http = self._bind_progress("chinabond", issuer=name, category="评级文件", scope="list")
+        try:
+            for pack in self.cb.iter_pages(name, start_page=start_page, max_pages=self.max_pages):
+                self.wait_if_paused()
+                added = 0
+                for item in pack["items"]:
+                    row = self._to_row(seq, name, item)
+                    if item.get("locked"):
+                        row["status"] = "locked"
+                        row["error"] = "skip_login"
+                    else:
+                        row["status"] = "listed" if item.get("pdf_url") else "no_file"
+                    key = _row_key(row)
+                    prev = self._index.get(key) if key else None
+                    if prev and prev.get("status") in {"ok", "listed", "locked", "no_file"}:
+                        out.append({**item, "_row": prev})
+                        continue
+                    self._write_row(row)
+                    added += 1
+                    out.append({**item, "_row": row})
+                    if item.get("locked"):
+                        self.progress.add_download(name, job_key, "locked")
+                last_total = pack["total"]
+                last_page = pack["page"]
+                last_pages = pack["pages"]
+                self.progress.mark_page(
+                    name,
+                    job_key,
+                    page=pack["page"],
+                    total=pack["total"],
+                    pages=pack["pages"],
+                    added=added,
+                )
+                self.log(
+                    f"    页 {pack['page']}/{pack['pages']} 本页新 {added} 条，接口总数 {pack['total']}"
+                )
+                for it in pack["items"]:
+                    it["_page"] = pack["page"]
+                self._hook(
+                    "list_page",
+                    {
+                        "issuer": name,
+                        "source": "chinabond",
+                        "category": "评级文件",
+                        "page": pack["page"],
+                        "pages": pack["pages"],
+                        "total": pack["total"],
+                        "added": added,
+                        "items": self._brief_items(pack["items"], page=pack["page"], category="评级文件"),
+                    },
+                )
+            self.progress.mark_list_done(name, job_key, last_total)
             self._hook(
-                "list_page",
+                "list_done",
                 {
                     "issuer": name,
                     "source": "chinabond",
                     "category": "评级文件",
-                    "page": pack["page"],
-                    "pages": pack["pages"],
-                    "total": pack["total"],
-                    "added": added,
-                    "items": self._brief_items(pack["items"], page=pack["page"], category="评级文件"),
+                    "page": last_page,
+                    "pages": last_pages,
+                    "total": last_total,
                 },
             )
-        self.progress.mark_list_done(name, job_key, last_total)
-        self._hook(
-            "list_done",
-            {
-                "issuer": name,
-                "source": "chinabond",
-                "category": "评级文件",
-                "page": last_page,
-                "pages": last_pages,
-                "total": last_total,
-            },
-        )
-        return out
+            return out
+        finally:
+            http.bind_progress(None)
 
     def _pending_from_index(self, name: str, source: str, category: str) -> list[dict[str, Any]]:
         out = []
@@ -706,6 +714,15 @@ class Crawler:
                 "status": "downloading",
             },
         )
+        http = self._bind_progress(
+            source,
+            issuer=name,
+            id=task_id,
+            title=item.get("title") or "",
+            category=item.get("category") or "",
+            page=int(item.get("_page") or 0),
+            scope="download",
+        )
         try:
             client = self.cm if source == "chinamoney" else self.cb
             data, remote_name = client.download(item)
@@ -760,6 +777,17 @@ class Crawler:
                 },
             )
             return row["status"]
+        finally:
+            http.bind_progress(None)
+
+    def _bind_progress(self, source: str, **ctx: Any):
+        http = self.http_cm if source == "chinamoney" else self.http_cb
+
+        def _cb(payload: dict[str, Any]) -> None:
+            self._hook("attempt", {"source": source, **ctx, **payload})
+
+        http.bind_progress(_cb)
+        return http
 
     def _hook_file(self, name: str, item: dict[str, Any], *, status: str, error: str = "") -> None:
         self._hook(

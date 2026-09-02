@@ -56,6 +56,19 @@ class BrowserSession:
     def is_warm(self) -> bool:
         return bool(getattr(self._local, "warm", False))
 
+    def bind_progress(self, cb: Optional[Any]) -> None:
+        self._local.progress = cb
+
+    def _notify(self, payload: dict[str, Any]) -> None:
+        print(f"  [http] {payload.get('label')}", flush=True)
+        cb = getattr(self._local, "progress", None)
+        if not cb:
+            return
+        try:
+            cb(payload)
+        except Exception:
+            pass
+
     def sleep(self, scale: float = 1.0) -> None:
         if self.delay <= 0:
             return
@@ -83,15 +96,39 @@ class BrowserSession:
             direct_tries=1 if direct_tries is None else direct_tries,
         )
         total_tries = len(kinds)
+        on_attempt = kwargs.pop("on_attempt", None)
         for attempt, kind in enumerate(kinds, 1):
             use_proxy = kind == "proxy" and bool(self.proxy_pool)
             proxy = self.proxy_pool.acquire() if use_proxy else None
             proxy_url = ProxyPool.as_url(proxy) if use_proxy else None
-            via = f"proxy {proxy}" if proxy_url else "direct"
+            nxt = kinds[attempt] if attempt < total_tries else ""
+            info = {
+                "event": "try",
+                "kind": kind,
+                "attempt": attempt,
+                "total": total_tries,
+                "proxy": proxy or "",
+                "next_kind": nxt,
+                "status": "proxy" if kind == "proxy" else "direct",
+                "label": format_attempt(
+                    event="try",
+                    kind=kind,
+                    attempt=attempt,
+                    total=total_tries,
+                    proxy=proxy or "",
+                ),
+            }
+            self._notify(info)
+            if on_attempt:
+                try:
+                    on_attempt(info)
+                except Exception:
+                    pass
             try:
                 extra = dict(kwargs)
                 extra.pop("proxy", None)
                 extra.pop("proxies", None)
+                extra.pop("on_attempt", None)
                 if proxy_url:
                     extra["proxy"] = proxy_url
                 resp = self._session().request(
@@ -103,13 +140,61 @@ class BrowserSession:
                 )
                 last_resp = resp
                 if _looks_like_login(resp):
-                    print(f"  [http] {attempt}/{total_tries} {via} 需登录，不再重试", flush=True)
+                    info = {
+                        "event": "login",
+                        "kind": kind,
+                        "attempt": attempt,
+                        "total": total_tries,
+                        "proxy": proxy or "",
+                        "next_kind": "",
+                        "status": "locked",
+                        "reason": "需登录",
+                        "label": format_attempt(
+                            event="login",
+                            kind=kind,
+                            attempt=attempt,
+                            total=total_tries,
+                            proxy=proxy or "",
+                            reason="需登录",
+                        ),
+                    }
+                    self._notify(info)
+                    if on_attempt:
+                        try:
+                            on_attempt(info)
+                        except Exception:
+                            pass
                     return resp
                 bad = resp.status_code in (403, 407, 412, 429, 502, 503, 504) or (
                     resp.status_code == 200 and not resp.content
                 )
-                if bad:
-                    print(f"  [http] {attempt}/{total_tries} {via} status={resp.status_code} 换IP重试", flush=True)
+                if bad or resp.status_code >= 500:
+                    reason = "空响应" if resp.status_code == 200 and not resp.content else f"HTTP {resp.status_code}"
+                    info = {
+                        "event": "retry",
+                        "kind": kind,
+                        "attempt": attempt,
+                        "total": total_tries,
+                        "proxy": proxy or "",
+                        "next_kind": nxt,
+                        "status": "retry",
+                        "reason": reason,
+                        "label": format_attempt(
+                            event="retry",
+                            kind=kind,
+                            attempt=attempt,
+                            total=total_tries,
+                            proxy=proxy or "",
+                            reason=reason,
+                            next_kind=nxt,
+                        ),
+                    }
+                    self._notify(info)
+                    if on_attempt:
+                        try:
+                            on_attempt(info)
+                        except Exception:
+                            pass
                     if self.proxy_pool and use_proxy:
                         self.proxy_pool.report_bad(proxy)
                     if retry_timeouts_only:
@@ -130,18 +215,35 @@ class BrowserSession:
                     if warmup is not None:
                         warmup(self)
                     continue
-                if resp.status_code >= 500:
-                    print(f"  [http] {attempt}/{total_tries} {via} status={resp.status_code} 换IP重试", flush=True)
-                    if self.proxy_pool and use_proxy:
-                        self.proxy_pool.report_bad(proxy)
-                    if attempt == total_tries:
-                        return resp
-                    self._rebuild()
-                    continue
                 return resp
             except Exception as e:
                 last_exc = e
-                print(f"  [http] {attempt}/{total_tries} {via} {type(e).__name__}: {e}", flush=True)
+                reason = "超时" if _timeout_like(e) else f"{type(e).__name__}"
+                info = {
+                    "event": "retry",
+                    "kind": kind,
+                    "attempt": attempt,
+                    "total": total_tries,
+                    "proxy": proxy or "",
+                    "next_kind": nxt,
+                    "status": "retry",
+                    "reason": reason,
+                    "label": format_attempt(
+                        event="retry",
+                        kind=kind,
+                        attempt=attempt,
+                        total=total_tries,
+                        proxy=proxy or "",
+                        reason=reason,
+                        next_kind=nxt,
+                    ),
+                }
+                self._notify(info)
+                if on_attempt:
+                    try:
+                        on_attempt(info)
+                    except Exception:
+                        pass
                 if retry_timeouts_only and not _timeout_like(e):
                     raise
                 if self.proxy_pool and use_proxy:
@@ -180,6 +282,36 @@ def _attempt_kinds(*, has_pool: bool, proxy_tries: int, direct_tries: int) -> li
         kinds.extend(["proxy"] * max(0, int(proxy_tries)))
     kinds.extend(["direct"] * max(0, int(direct_tries)))
     return kinds or ["direct"]
+
+
+def format_attempt(
+    *,
+    event: str,
+    kind: str,
+    attempt: int,
+    total: int,
+    proxy: str = "",
+    reason: str = "",
+    next_kind: str = "",
+) -> str:
+    ip = (proxy or "").split(":")[0] if kind == "proxy" else ""
+    if kind == "proxy":
+        via = f"走代理 {ip}".strip() if ip else "走代理"
+    else:
+        via = "走直连"
+    slot = f"{attempt}/{total}"
+    if event == "try":
+        return f"{via} {slot}"
+    if event == "login":
+        return f"{via} {slot} · 需登录，停止"
+    if next_kind == "proxy":
+        action = f"换代理 {attempt + 1}/{total}"
+    elif next_kind == "direct":
+        action = f"改直连 {attempt + 1}/{total}"
+    else:
+        action = "已用尽"
+    why = reason or "失败"
+    return f"{via} {slot} · {why}，{action}"
 
 
 def _timeout_like(exc: Exception) -> bool:

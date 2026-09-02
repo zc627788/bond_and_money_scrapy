@@ -22,6 +22,9 @@ MAX_CONCUR = 50
 FILE_STATUS = {
     "listed": "待下载",
     "downloading": "下载中",
+    "proxy": "走代理",
+    "direct": "走直连",
+    "retry": "重试中",
     "ok": "成功",
     "fail": "失败",
     "not_pdf": "失败",
@@ -168,6 +171,7 @@ class App(tk.Tk):
         self.detail.tag_configure("fail", foreground="#a40000")
         self.detail.tag_configure("ok", foreground="#1a7f37")
         self.detail.tag_configure("skip", foreground="#666")
+        self.detail.tag_configure("retry", foreground="#b36b00")
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=self.detail.yview)
         self.detail.configure(yscrollcommand=vsb.set)
         self.detail.pack(side="left", fill="both", expand=True)
@@ -308,6 +312,7 @@ class App(tk.Tk):
             "list_error": lambda p: self._q.put(("list_error", p)),
             "file_start": lambda p: self._q.put(("file_start", p)),
             "file_done": lambda p: self._q.put(("file_done", p)),
+            "attempt": lambda p: self._q.put(("attempt", p)),
             "source_done": lambda p: self._q.put(("source_done", p)),
             "skipped": lambda p: self._q.put(("skipped", p)),
         }
@@ -574,6 +579,38 @@ class App(tk.Tk):
                     if bits:
                         st["current"] = " · ".join(bits)
                     self._paint(name, src)
+                elif kind == "attempt":
+                    name = payload.get("issuer") or ""
+                    src = payload.get("source") or ""
+                    if src not in self._trees:
+                        continue
+                    st = self._side(name, src)
+                    label = str(payload.get("label") or "")
+                    title = str(payload.get("title") or "")
+                    cat = str(payload.get("category") or st.get("category") or "")
+                    if payload.get("scope") == "list" or not title:
+                        page = int(payload.get("page") or st.get("page") or 0)
+                        pages = int(st.get("pages") or 0)
+                        prefix = f"{cat} {page}/{pages or '?'}页" if (cat or page) else "查询列表"
+                        st["current"] = f"{prefix} · {label}" if label else prefix
+                    else:
+                        short = title[:28]
+                        st["current"] = f"{short} · {label}" if label else short
+                    if payload.get("id") or title:
+                        self._upsert_file(
+                            name,
+                            src,
+                            {
+                                "id": payload.get("id") or "",
+                                "title": title,
+                                "category": cat,
+                                "page": payload.get("page") or st.get("page") or "",
+                                "status": payload.get("status") or "retry",
+                                "error": label,
+                            },
+                        )
+                    self._paint(name, src)
+                    self._maybe_refresh_detail(name, src)
                 elif kind == "file_start":
                     name = payload.get("issuer") or ""
                     src = payload.get("source") or ""
@@ -701,11 +738,35 @@ class App(tk.Tk):
         self.detail_meta.config(text="  |  ".join(bits))
         for iid in self.detail.get_children():
             self.detail.delete(iid)
-        order = {"downloading": 0, "fail": 1, "not_pdf": 1, "listed": 2, "ok": 3, "skip": 4, "locked": 5, "no_file": 6}
+        order = {
+            "downloading": 0,
+            "proxy": 0,
+            "direct": 0,
+            "retry": 0,
+            "fail": 1,
+            "not_pdf": 1,
+            "listed": 2,
+            "ok": 3,
+            "skip": 4,
+            "locked": 5,
+            "no_file": 6,
+        }
         files.sort(key=lambda x: (order.get(str(x.get("status")), 9), str(x.get("page") or ""), str(x.get("title") or "")))
         for f in files[:400]:
             status = str(f.get("status") or "listed")
-            tag = "fail" if status in {"fail", "not_pdf"} else ("ok" if status == "ok" else ("skip" if status in {"skip", "locked", "no_file"} else ""))
+            tag = (
+                "fail"
+                if status in {"fail", "not_pdf"}
+                else (
+                    "ok"
+                    if status == "ok"
+                    else (
+                        "retry"
+                        if status in {"proxy", "direct", "retry", "downloading"}
+                        else ("skip" if status in {"skip", "locked", "no_file"} else "")
+                    )
+                )
+            )
             page_s = str(f.get("page") or "")
             self.detail.insert(
                 "",
