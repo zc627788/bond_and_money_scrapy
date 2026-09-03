@@ -148,6 +148,42 @@ class BrowserSession:
                 )
                 elapsed = time.perf_counter() - t0
                 last_resp = resp
+                if resp.status_code == 403:
+                    bad_lease = True
+                    info = {
+                        "event": "retry",
+                        "kind": kind,
+                        "attempt": attempt,
+                        "total": total_tries,
+                        "proxy": proxy or "",
+                        "next_kind": nxt,
+                        "status": "retry",
+                        "reason": "反爬 403",
+                        "label": format_attempt(
+                            event="retry",
+                            kind=kind,
+                            attempt=attempt,
+                            total=total_tries,
+                            proxy=proxy or "",
+                            reason="反爬拦截（HTTP 403）",
+                            next_kind=nxt,
+                        ),
+                    }
+                    self._notify(info)
+                    if on_attempt:
+                        try:
+                            on_attempt(info)
+                        except Exception:
+                            pass
+                    if attempt == total_tries:
+                        return resp
+                    self._rebuild()
+                    if warmup is not None:
+                        try:
+                            warmup(self)
+                        except Exception:
+                            pass
+                    continue
                 if _looks_like_login(resp):
                     info = {
                         "event": "login",
@@ -366,7 +402,7 @@ def explain_download_failure(resp: creq.Response, *, url: str = "", want_pdf: bo
     code = int(resp.status_code or 0)
     data = resp.content or b""
     if code == 403:
-        return DownloadError("link", "链接问题（HTTP 403）", 403, url)
+        return DownloadError("block", "反爬拦截（HTTP 403）", 403, url)
     if code in (401, 407):
         return DownloadError("login", f"登录问题（HTTP {code}）", code, url)
     if 200 <= code < 300 and _looks_like_login(resp):

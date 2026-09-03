@@ -50,6 +50,7 @@ SOURCE_CN = {
 }
 ERROR_TYPE_CN = {
     "timeout": "超时",
+    "block": "反爬拦截",
     "link": "链接问题",
     "login": "登录问题",
     "missing": "链接不存在",
