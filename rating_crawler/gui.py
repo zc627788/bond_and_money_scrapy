@@ -115,6 +115,15 @@ class App(tk.Tk):
         self.status = ttk.Label(btn, text="就绪")
         self.status.pack(side="left", padx=16)
 
+        overall = ttk.Frame(self)
+        overall.pack(fill="x", padx=12, pady=(2, 4))
+        ttk.Label(overall, text="总进度").pack(side="left")
+        self.overall_bar = ttk.Progressbar(overall, mode="determinate", maximum=100)
+        self.overall_bar.pack(side="left", fill="x", expand=True, padx=8)
+        self.overall_label = ttk.Label(overall, text="还没开始", foreground="#555", width=36)
+        self.overall_label.pack(side="left")
+        self._total_n = 0
+
         split = ttk.Panedwindow(self, orient="vertical")
         split.pack(fill="both", expand=True, padx=12, pady=(4, 8))
         panes = ttk.Frame(split)
@@ -307,10 +316,12 @@ class App(tk.Tk):
         for _, name in issuers:
             self._ensure_company(name)
             self._paint(name)
+        self._total_n = len(issuers)
+        self._refresh_overall()
         self.btn_start.config(state="disabled")
         self.btn_pause.config(state="normal")
         self.btn_resume.config(state="disabled")
-        self.status.config(text=f"抓取中 · {len(issuers)} 家")
+        self.status.config(text=f"进行中 · 共 {len(issuers)} 家")
         hooks = {
             "log": lambda m: self._q.put(("log", m)),
             "issuer": lambda p: self._q.put(("issuer", p)),
@@ -499,6 +510,7 @@ class App(tk.Tk):
                                 st["phase"] = "waiting"
                                 st["current"] = "等待该源查询"
                     self._paint(name)
+                    self._refresh_overall()
                 elif kind == "skipped":
                     name = payload.get("name") or ""
                     rec = self._ensure_company(name)
@@ -517,6 +529,7 @@ class App(tk.Tk):
                         if st["locked"]:
                             st["current"] += f" · 锁定 {st['locked']}"
                     self._paint(name)
+                    self._refresh_overall()
                 elif kind == "list_start":
                     name = payload.get("issuer") or ""
                     src = payload.get("source") or ""
@@ -667,14 +680,46 @@ class App(tk.Tk):
                         st["current"] = st.get("current") or "未全部完成，下次续跑"
                     self._paint(name, src)
                     self._maybe_refresh_detail(name, src)
+                    self._refresh_overall()
                 elif kind == "done":
                     self.status.config(text=str(payload))
                     self.btn_start.config(state="normal")
                     self.btn_pause.config(state="disabled")
                     self.btn_resume.config(state="disabled")
+                    self._refresh_overall()
         except queue.Empty:
             pass
         self.after(120, self._pump)
+
+    def _company_finished(self, name: str) -> bool:
+        rec = self._co.get(name) or {}
+        sides = [rec.get("chinamoney"), rec.get("chinabond")]
+        if not all(sides):
+            return False
+        done = {"skipped", "done", "empty", "failed"}
+        return all((s.get("phase") in done) for s in sides)
+
+    def _refresh_overall(self) -> None:
+        total = int(self._total_n or 0)
+        if total <= 0:
+            self.overall_bar["value"] = 0
+            self.overall_label.config(text="还没开始")
+            return
+        finished = sum(1 for name in self._co if self._company_finished(name))
+        running = 0
+        for rec in self._co.values():
+            busy = False
+            for src in ("chinamoney", "chinabond"):
+                phase = (rec.get(src) or {}).get("phase")
+                if phase in {"listing", "downloading", "running", "waiting"}:
+                    busy = True
+                    break
+            if busy:
+                running += 1
+        pct = int(finished * 100 / total)
+        self.overall_bar["value"] = pct
+        extra = f"    正在处理 {running} 家" if running else ""
+        self.overall_label.config(text=f"{finished}/{total} 家已结束  {pct}%{extra}")
 
     def _on_select(self, source: str, tree: ttk.Treeview) -> None:
         sel = tree.selection()
