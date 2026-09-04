@@ -88,12 +88,12 @@ class App(tk.Tk):
         opt = ttk.Frame(self)
         opt.pack(fill="x", **pad)
         ttk.Label(opt, text="同时查几家公司").pack(side="left")
-        self.issuer_workers = tk.IntVar(value=_clamp(self.settings.get("issuer_workers", 4)))
+        self.issuer_workers = tk.IntVar(value=_clamp(self.settings.get("issuer_workers", 2)))
         ttk.Spinbox(opt, from_=1, to=MAX_CONCUR, width=5, textvariable=self.issuer_workers).pack(side="left", padx=4)
         ttk.Label(opt, text="同时下几个文件").pack(side="left", padx=(16, 0))
-        self.workers = tk.IntVar(value=_clamp(self.settings.get("workers", 8)))
+        self.workers = tk.IntVar(value=_clamp(self.settings.get("workers", 4)))
         ttk.Spinbox(opt, from_=1, to=MAX_CONCUR, width=5, textvariable=self.workers).pack(side="left", padx=4)
-        ttk.Label(opt, text="上限 50", foreground="#888").pack(side="left", padx=8)
+        ttk.Label(opt, text="建议 2×4，开太大容易 403", foreground="#888").pack(side="left", padx=8)
 
         proxy_fr = ttk.Frame(self)
         proxy_fr.pack(fill="x", **pad)
@@ -114,6 +114,12 @@ class App(tk.Tk):
         ttk.Button(btn, text="打开结果文件夹", command=self._open_out).pack(side="right")
         self.status = ttk.Label(btn, text="就绪")
         self.status.pack(side="left", padx=16)
+        self.data_label = ttk.Label(
+            self,
+            text=f"已下载文件和清单在：{self.root_dir}",
+            foreground="#555",
+        )
+        self.data_label.pack(anchor="w", padx=12, pady=(0, 2))
 
         overall = ttk.Frame(self)
         overall.pack(fill="x", padx=12, pady=(2, 4))
@@ -313,15 +319,18 @@ class App(tk.Tk):
         for tree in self._trees.values():
             for iid in tree.get_children():
                 tree.delete(iid)
+        self.status.config(text=f"载入名单 {len(issuers)} 家…")
+        self.update_idletasks()
         for _, name in issuers:
             self._ensure_company(name)
-            self._paint(name)
         self._total_n = len(issuers)
         self._refresh_overall()
         self.btn_start.config(state="disabled")
         self.btn_pause.config(state="normal")
         self.btn_resume.config(state="disabled")
-        self.status.config(text=f"进行中 · 共 {len(issuers)} 家")
+        self.status.config(text=f"进行中 · 共 {len(issuers)} 家 · 正在核对断点")
+        settings = self._settings()
+        root = self.root_dir
         hooks = {
             "log": lambda m: self._q.put(("log", m)),
             "issuer": lambda p: self._q.put(("issuer", p)),
@@ -336,11 +345,11 @@ class App(tk.Tk):
             "source_done": lambda p: self._q.put(("source_done", p)),
             "skipped": lambda p: self._q.put(("skipped", p)),
         }
-        crawler = Crawler(self._settings(), self.root_dir, hooks=hooks)
-        self._crawler = crawler
 
         def work() -> None:
             try:
+                crawler = Crawler(settings, root, hooks=hooks)
+                self._crawler = crawler
                 crawler.run(issuers, sources=("chinamoney", "chinabond"), download=True, resume=True)
                 self._q.put(("done", "完成"))
             except Exception as e:
@@ -500,196 +509,209 @@ class App(tk.Tk):
         try:
             while True:
                 kind, payload = self._q.get_nowait()
-                if kind == "issuer":
-                    name = payload.get("name") or ""
-                    rec = self._ensure_company(name)
-                    phase = payload.get("phase") or "start"
-                    if phase == "start":
-                        for src, st in rec.items():
-                            if st.get("phase") in {"queued", "waiting"}:
-                                st["phase"] = "waiting"
-                                st["current"] = "等待该源查询"
-                    self._paint(name)
-                    self._refresh_overall()
-                elif kind == "skipped":
-                    name = payload.get("name") or ""
-                    rec = self._ensure_company(name)
-                    by_source = payload.get("by_source") or {}
-                    for src, st in rec.items():
-                        info = by_source.get(src) or {}
-                        st["phase"] = "skipped"
-                        st["done"] = int(info.get("ok") or 0)
-                        st["fail"] = 0
-                        st["locked"] = int(info.get("locked") or 0)
-                        st["skip"] = st["done"]
-                        if st["done"]:
-                            st["current"] = f"此前已完成，本次跳过 · {st['done']} 个文件"
-                        else:
-                            st["current"] = "此前已完成（无文件），本次跳过"
-                        if st["locked"]:
-                            st["current"] += f" · 锁定 {st['locked']}"
-                    self._paint(name)
-                    self._refresh_overall()
-                elif kind == "list_start":
-                    name = payload.get("issuer") or ""
-                    src = payload.get("source") or ""
-                    if src not in self._trees:
-                        continue
-                    st = self._side(name, src)
-                    st["phase"] = "listing"
-                    st["category"] = str(payload.get("category") or "")
-                    st["page"] = int(payload.get("page") or 1)
-                    st["pages"] = int(payload.get("pages") or 0)
-                    st["list_error"] = ""
-                    st["current"] = f"{st['category']} · 开始翻页"
-                    self._paint(name, src)
-                elif kind in {"list_page", "list_done"}:
-                    name = payload.get("issuer") or ""
-                    src = payload.get("source") or ""
-                    if src not in self._trees:
-                        continue
-                    st = self._side(name, src)
-                    if st.get("phase") not in {"failed", "skipped", "downloading", "done"}:
-                        st["phase"] = "listing"
-                    st["category"] = str(payload.get("category") or st.get("category") or "")
-                    if payload.get("page"):
-                        st["page"] = int(payload.get("page") or 0)
-                    if payload.get("pages"):
-                        st["pages"] = int(payload.get("pages") or 0)
-                    st["added"] = int(payload.get("added") or 0)
-                    if kind == "list_page":
-                        st["current"] = f"{st['category']} · {st['page']}/{st['pages'] or '?'}页"
-                    for it in payload.get("items") or []:
-                        self._upsert_file(name, src, it)
-                    self._paint(name, src)
-                    self._maybe_refresh_detail(name, src)
-                elif kind == "list_error":
-                    name = payload.get("issuer") or ""
-                    src = payload.get("source") or ""
-                    if src not in self._trees:
-                        continue
-                    st = self._side(name, src)
-                    st["phase"] = "failed"
-                    st["category"] = str(payload.get("category") or st.get("category") or "")
-                    st["list_error"] = str(payload.get("error") or "列表失败")
-                    st["current"] = st["list_error"][:60]
-                    self._paint(name, src)
-                    self._maybe_refresh_detail(name, src)
-                elif kind == "listed":
-                    name = payload.get("issuer") or ""
-                    src = payload.get("source") or ""
-                    if src not in self._trees:
-                        continue
-                    st = self._side(name, src)
-                    if st.get("phase") != "failed":
-                        st["phase"] = "downloading"
-                    st["total"] = int(payload.get("total") or 0)
-                    st["done"] = int(payload.get("done") or 0)
-                    st["skip"] = int(payload.get("skip") or st["done"])
-                    st["locked"] = int(payload.get("locked") or 0)
-                    st["missing"] = int(payload.get("missing") or 0)
-                    st["retry"] = int(payload.get("retry") or 0)
-                    bits = []
-                    if st["missing"]:
-                        bits.append(f"补缺失 {st['missing']}")
-                    if st["retry"]:
-                        bits.append(f"重试失败 {st['retry']}")
-                    if st["skip"]:
-                        bits.append(f"已有 {st['skip']}")
-                    if st["locked"]:
-                        bits.append(f"锁定 {st['locked']}")
-                    if bits:
-                        st["current"] = " · ".join(bits)
-                    self._paint(name, src)
-                elif kind == "attempt":
-                    name = payload.get("issuer") or ""
-                    src = payload.get("source") or ""
-                    if src not in self._trees:
-                        continue
-                    st = self._side(name, src)
-                    label = str(payload.get("label") or "")
-                    title = str(payload.get("title") or "")
-                    cat = str(payload.get("category") or st.get("category") or "")
-                    if payload.get("scope") == "list" or not title:
-                        page = int(payload.get("page") or st.get("page") or 0)
-                        pages = int(st.get("pages") or 0)
-                        prefix = f"{cat} {page}/{pages or '?'}页" if (cat or page) else "查询列表"
-                        st["current"] = f"{prefix} · {label}" if label else prefix
-                    else:
-                        short = title[:28]
-                        st["current"] = f"{short} · {label}" if label else short
-                    if payload.get("id") or title:
-                        self._upsert_file(
-                            name,
-                            src,
-                            {
-                                "id": payload.get("id") or "",
-                                "title": title,
-                                "category": cat,
-                                "page": payload.get("page") or st.get("page") or "",
-                                "status": payload.get("status") or "retry",
-                                "error": label,
-                            },
-                        )
-                    self._paint(name, src)
-                    self._maybe_refresh_detail(name, src)
-                elif kind == "file_start":
-                    name = payload.get("issuer") or ""
-                    src = payload.get("source") or ""
-                    if src not in self._trees:
-                        continue
-                    st = self._side(name, src)
-                    if st.get("phase") != "failed":
-                        st["phase"] = "downloading"
-                    st["current"] = str(payload.get("title") or "")[:50]
-                    payload = {**payload, "status": "downloading"}
-                    self._upsert_file(name, src, payload)
-                    self._paint(name, src)
-                    self._maybe_refresh_detail(name, src)
-                elif kind == "file_done":
-                    name = payload.get("issuer") or ""
-                    src = payload.get("source") or ""
-                    if src not in self._trees:
-                        continue
-                    st = self._side(name, src)
-                    status = payload.get("status")
-                    if status == "ok":
-                        st["done"] = int(st["done"]) + 1
-                    elif status == "locked":
-                        st["locked"] = int(st.get("locked") or 0) + 1
-                    elif status in {"fail", "not_pdf"}:
-                        st["fail"] = int(st["fail"]) + 1
-                    self._upsert_file(name, src, payload)
-                    self._paint(name, src)
-                    self._maybe_refresh_detail(name, src)
-                elif kind == "source_done":
-                    name = payload.get("issuer") or ""
-                    src = payload.get("source") or ""
-                    if src not in self._trees:
-                        continue
-                    st = self._side(name, src)
-                    phase = payload.get("phase") or "done"
-                    if st.get("phase") != "failed" or phase == "failed":
-                        st["phase"] = phase
-                    if phase == "empty":
-                        st["current"] = "该源没有可下载报告"
-                    elif phase == "done" and not st.get("fail"):
-                        if st.get("current") in {"", "等待该源查询", "正在查询列表…"}:
-                            st["current"] = "完成"
-                    elif phase == "failed" and not st.get("list_error"):
-                        st["current"] = st.get("current") or "未全部完成，下次续跑"
-                    self._paint(name, src)
-                    self._maybe_refresh_detail(name, src)
-                    self._refresh_overall()
-                elif kind == "done":
-                    self.status.config(text=str(payload))
-                    self.btn_start.config(state="normal")
-                    self.btn_pause.config(state="disabled")
-                    self.btn_resume.config(state="disabled")
-                    self._refresh_overall()
+                try:
+                    self._on_event(kind, payload)
+                except Exception as e:
+                    try:
+                        self.status.config(text=f"界面更新出错: {e}")
+                    except Exception:
+                        pass
         except queue.Empty:
             pass
         self.after(120, self._pump)
+
+    def _on_event(self, kind: str, payload) -> None:
+        if kind == "issuer":
+            name = payload.get("name") or ""
+            rec = self._ensure_company(name)
+            phase = payload.get("phase") or "start"
+            if phase == "start":
+                for src, st in rec.items():
+                    if st.get("phase") in {"queued", "waiting"}:
+                        st["phase"] = "running"
+                        st["current"] = "开始查询"
+            self._paint(name)
+            self._refresh_overall()
+        elif kind == "skipped":
+            name = payload.get("name") or ""
+            rec = self._ensure_company(name)
+            by_source = payload.get("by_source") or {}
+            for src, st in rec.items():
+                info = by_source.get(src) or {}
+                st["phase"] = "skipped"
+                st["done"] = int(info.get("ok") or 0)
+                st["fail"] = 0
+                st["locked"] = int(info.get("locked") or 0)
+                st["skip"] = st["done"]
+                if st["done"]:
+                    st["current"] = f"此前已完成，本次跳过 · {st['done']} 个文件"
+                else:
+                    st["current"] = "此前已完成（无文件），本次跳过"
+                if st["locked"]:
+                    st["current"] += f" · 锁定 {st['locked']}"
+            self._paint(name)
+            self._refresh_overall()
+        elif kind == "list_start":
+            name = payload.get("issuer") or ""
+            src = payload.get("source") or ""
+            if src not in self._trees:
+                return
+            st = self._side(name, src)
+            st["phase"] = "listing"
+            st["category"] = str(payload.get("category") or "")
+            st["page"] = int(payload.get("page") or 1)
+            st["pages"] = int(payload.get("pages") or 0)
+            st["list_error"] = ""
+            st["current"] = f"{st['category']} · 开始翻页"
+            self._paint(name, src)
+        elif kind in {"list_page", "list_done"}:
+            name = payload.get("issuer") or ""
+            src = payload.get("source") or ""
+            if src not in self._trees:
+                return
+            st = self._side(name, src)
+            if st.get("phase") not in {"failed", "skipped", "downloading", "done"}:
+                st["phase"] = "listing"
+            st["category"] = str(payload.get("category") or st.get("category") or "")
+            if payload.get("page"):
+                st["page"] = int(payload.get("page") or 0)
+            if payload.get("pages"):
+                st["pages"] = int(payload.get("pages") or 0)
+            st["added"] = int(payload.get("added") or 0)
+            if kind == "list_page":
+                st["current"] = f"{st['category']} · {st['page']}/{st['pages'] or '?'}页"
+            for it in payload.get("items") or []:
+                self._upsert_file(name, src, it)
+            self._paint(name, src)
+            self._maybe_refresh_detail(name, src)
+        elif kind == "list_error":
+            name = payload.get("issuer") or ""
+            src = payload.get("source") or ""
+            if src not in self._trees:
+                return
+            st = self._side(name, src)
+            st["phase"] = "failed"
+            st["category"] = str(payload.get("category") or st.get("category") or "")
+            st["list_error"] = str(payload.get("error") or "列表失败")
+            st["current"] = st["list_error"][:60]
+            self._paint(name, src)
+            self._maybe_refresh_detail(name, src)
+        elif kind == "listed":
+            name = payload.get("issuer") or ""
+            src = payload.get("source") or ""
+            if src not in self._trees:
+                return
+            st = self._side(name, src)
+            if st.get("phase") != "failed":
+                st["phase"] = "downloading"
+            st["total"] = int(payload.get("total") or 0)
+            st["done"] = int(payload.get("done") or 0)
+            st["skip"] = int(payload.get("skip") or st["done"])
+            st["locked"] = int(payload.get("locked") or 0)
+            st["missing"] = int(payload.get("missing") or 0)
+            st["retry"] = int(payload.get("retry") or 0)
+            bits = []
+            if st["missing"]:
+                bits.append(f"补缺失 {st['missing']}")
+            if st["retry"]:
+                bits.append(f"重试失败 {st['retry']}")
+            if st["skip"]:
+                bits.append(f"已有 {st['skip']}")
+            if st["locked"]:
+                bits.append(f"锁定 {st['locked']}")
+            if bits:
+                st["current"] = " · ".join(bits)
+            self._paint(name, src)
+        elif kind == "attempt":
+            name = payload.get("issuer") or ""
+            src = payload.get("source") or ""
+            if src not in self._trees:
+                return
+            st = self._side(name, src)
+            label = str(payload.get("label") or "")
+            title = str(payload.get("title") or "")
+            cat = str(payload.get("category") or st.get("category") or "")
+            if payload.get("scope") == "list" or not title:
+                page = int(payload.get("page") or st.get("page") or 0)
+                pages = int(st.get("pages") or 0)
+                prefix = f"{cat} {page}/{pages or '?'}页" if (cat or page) else "查询列表"
+                st["current"] = f"{prefix} · {label}" if label else prefix
+            else:
+                short = title[:28]
+                st["current"] = f"{short} · {label}" if label else short
+            if payload.get("id") or title:
+                self._upsert_file(
+                    name,
+                    src,
+                    {
+                        "id": payload.get("id") or "",
+                        "title": title,
+                        "category": cat,
+                        "page": payload.get("page") or st.get("page") or "",
+                        "status": payload.get("status") or "retry",
+                        "error": label,
+                    },
+                )
+            self._paint(name, src)
+            self._maybe_refresh_detail(name, src)
+        elif kind == "file_start":
+            name = payload.get("issuer") or ""
+            src = payload.get("source") or ""
+            if src not in self._trees:
+                return
+            st = self._side(name, src)
+            if st.get("phase") != "failed":
+                st["phase"] = "downloading"
+            st["current"] = str(payload.get("title") or "")[:50]
+            payload = {**payload, "status": "downloading"}
+            self._upsert_file(name, src, payload)
+            self._paint(name, src)
+            self._maybe_refresh_detail(name, src)
+        elif kind == "file_done":
+            name = payload.get("issuer") or ""
+            src = payload.get("source") or ""
+            if src not in self._trees:
+                return
+            st = self._side(name, src)
+            status = payload.get("status")
+            if status == "ok":
+                st["done"] = int(st["done"]) + 1
+            elif status == "locked":
+                st["locked"] = int(st.get("locked") or 0) + 1
+            elif status in {"fail", "not_pdf"}:
+                st["fail"] = int(st["fail"]) + 1
+            self._upsert_file(name, src, payload)
+            self._paint(name, src)
+            self._maybe_refresh_detail(name, src)
+        elif kind == "source_done":
+            name = payload.get("issuer") or ""
+            src = payload.get("source") or ""
+            if src not in self._trees:
+                return
+            st = self._side(name, src)
+            phase = payload.get("phase") or "done"
+            if st.get("phase") != "failed" or phase == "failed":
+                st["phase"] = phase
+            if phase == "empty":
+                st["current"] = "该源没有可下载报告"
+            elif phase == "done" and not st.get("fail"):
+                if st.get("current") in {"", "等待该源查询", "正在查询列表…"}:
+                    st["current"] = "完成"
+            elif phase == "failed" and not st.get("list_error"):
+                st["current"] = st.get("current") or "未全部完成，下次续跑"
+            self._paint(name, src)
+            self._maybe_refresh_detail(name, src)
+            self._refresh_overall()
+        elif kind == "log":
+            text = str(payload or "").replace("\n", " ").strip()
+            if text:
+                self.status.config(text=text[-100:])
+        elif kind == "done":
+            self.status.config(text=str(payload))
+            self.btn_start.config(state="normal")
+            self.btn_pause.config(state="disabled")
+            self.btn_resume.config(state="disabled")
+            self._refresh_overall()
 
     def _company_finished(self, name: str) -> bool:
         rec = self._co.get(name) or {}

@@ -17,7 +17,14 @@ class Progress:
         self.data: dict[str, Any] = {"issuers": {}}
         if path.exists():
             try:
-                self.data = json.loads(path.read_text(encoding="utf-8"))
+                raw = path.read_text(encoding="utf-8-sig")
+                self.data = json.loads(raw) if raw.strip() else {"issuers": {}}
+            except json.JSONDecodeError:
+                try:
+                    self.data, _ = json.JSONDecoder().raw_decode(raw)
+                except Exception:
+                    print(f"  [progress] 断点文件损坏，已忽略: {path}", flush=True)
+                    self.data = {"issuers": {}}
             except Exception:
                 self.data = {"issuers": {}}
         if "issuers" not in self.data:

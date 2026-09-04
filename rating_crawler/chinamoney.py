@@ -52,18 +52,32 @@ class ChinaMoneyClient:
 
     def warmup(self, http: Optional[BrowserSession] = None) -> None:
         sess = http or self.http
-        sess.get(
-            HOME,
-            headers=_headers("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
-            retry_403=False,
-        )
-        sess.post(
-            APPLY,
-            data={"key": RBT_KEY},
-            headers=_headers("application/json, text/javascript, */*; q=0.01"),
-            retry_403=False,
-        )
-        sess.mark_warm()
+        has_pool = bool(sess.proxy_pool)
+        shot = {
+            "retry_403": False,
+            "proxy_tries": 1 if has_pool else 0,
+            "direct_tries": 0 if has_pool else 1,
+            "timeout": 8,
+        }
+        try:
+            home = sess.get(
+                HOME,
+                headers=_headers("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+                **shot,
+            )
+            if int(getattr(home, "status_code", 0) or 0) == 403:
+                return
+            apply = sess.post(
+                APPLY,
+                data={"key": RBT_KEY},
+                headers=_headers("application/json, text/javascript, */*; q=0.01"),
+                **shot,
+            )
+            if int(getattr(apply, "status_code", 0) or 0) == 403:
+                return
+            sess.mark_warm()
+        except Exception:
+            return
 
     def ensure(self) -> None:
         if not self.http.is_warm():
@@ -156,7 +170,6 @@ class ChinaMoneyClient:
                 "Accept-Language": "zh-CN,zh;q=0.9",
                 "Referer": HOME,
             },
-            warmup=self.warmup,
         )
         data = resp.content or b""
         filename = _filename_from_cd(resp.headers.get("content-disposition", "")) or ""

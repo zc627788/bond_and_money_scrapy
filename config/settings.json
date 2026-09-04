@@ -1,8 +1,9 @@
 {
   "delay_seconds": 0,
   "max_retries": 5,
-  "workers": 8,
-  "issuer_workers": 4,
+  "workers": 4,
+  "issuer_workers": 2,
+  "download_slots": 6,
   "download_dir": "downloads",
   "output_dir": "output",
   "proxy": {

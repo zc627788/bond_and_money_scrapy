@@ -50,13 +50,22 @@ class ChinaBondClient:
 
     def warmup(self, http: Optional[BrowserSession] = None) -> None:
         sess = http or self.http
-        sess.get(
-            HOME,
-            headers=_headers("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
-            retry_403=False,
-        )
-        self._ready = True
-        sess.mark_warm()
+        has_pool = bool(sess.proxy_pool)
+        try:
+            home = sess.get(
+                HOME,
+                headers=_headers("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+                retry_403=False,
+                proxy_tries=1 if has_pool else 0,
+                direct_tries=0 if has_pool else 1,
+                timeout=8,
+            )
+            if int(getattr(home, "status_code", 0) or 0) == 403:
+                return
+            self._ready = True
+            sess.mark_warm()
+        except Exception:
+            return
 
     def ensure(self) -> None:
         if not self.http.is_warm():
@@ -194,7 +203,6 @@ class ChinaBondClient:
                 "Accept-Language": "zh-CN,zh;q=0.9",
                 "Referer": item.get("detail_url") or HOME,
             },
-            warmup=self.warmup,
         )
         data = resp.content or b""
         fail = explain_download_failure(resp, url=url, want_pdf=item.get("suffix") == "pdf")

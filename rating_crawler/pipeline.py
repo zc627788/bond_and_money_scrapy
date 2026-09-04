@@ -29,8 +29,8 @@ class Crawler:
         self._pause.set()
         delay = float(settings.get("delay_seconds", 0))
         retries = int(settings.get("max_retries", 4))
-        self.workers = max(1, int(settings.get("workers", 12)))
-        self.issuer_workers = max(1, int(settings.get("issuer_workers", 4)))
+        self.workers = max(1, int(settings.get("workers", 4)))
+        self.issuer_workers = max(1, int(settings.get("issuer_workers", 2)))
         self.max_pages = int(settings.get("max_pages") or 0)
         self.download_dir = root / settings.get("download_dir", "downloads")
         self.output_dir = root / settings.get("output_dir", "output")
@@ -46,6 +46,12 @@ class Crawler:
                 max_extract=int(px.get("max_extract", 50)),
                 refresh_seconds=int(px.get("refresh_seconds", 180)),
             )
+        # 58ip 大约十几条能用，每条大约 10 个文件后 403。全局同时下载压在 6 路以内。
+        slots = int(settings.get("download_slots") or 0)
+        if slots <= 0:
+            slots = 6 if self.proxy_pool else max(1, self.workers)
+        self.download_slots = max(1, min(50, slots))
+        self._dl_gate = threading.Semaphore(self.download_slots)
 
         self.http_cm = BrowserSession(delay=delay, max_retries=retries, proxy_pool=self.proxy_pool)
         self.http_cb = BrowserSession(delay=delay, max_retries=retries, proxy_pool=self.proxy_pool)
@@ -95,7 +101,11 @@ class Crawler:
 
     def _load_index(self) -> dict[str, dict[str, Any]]:
         idx: dict[str, dict[str, Any]] = {}
-        for row in load_jsonl(self.records_path):
+        try:
+            rows = load_jsonl(self.records_path)
+        except Exception as e:
+            raise RuntimeError(f"读清单失败 {self.records_path}: {e}") from e
+        for row in rows:
             key = _row_key(row)
             if key:
                 idx[key] = row
@@ -117,9 +127,12 @@ class Crawler:
         resume: bool = True,
     ) -> None:
         sources = tuple(sources)
+        self.log(f"正在核对 {len(issuers)} 家公司的断点和本地文件…")
+        disk = self._stats_by_issuer()
+        empty = {"ok": 0, "fail": 0, "locked": 0, "missing": 0, "need": 0}
         todo = []
         for seq, name in issuers:
-            stats = {src: self._source_disk_stats(name, src) for src in sources}
+            stats = {src: dict((disk.get(name) or {}).get(src) or empty) for src in sources}
             lists_ok = self._lists_complete(name, sources)
             need = (not lists_ok) or any(st["need"] for st in stats.values())
             if resume and lists_ok and not need:
@@ -140,7 +153,10 @@ class Crawler:
                 self._log_repair(seq, name, stats)
             todo.append((seq, name))
         n = max(1, min(self.issuer_workers, len(todo) or 1))
-        self.log(f"公司并发 {n}，每家下载线程 {self.workers}（代理池共享）")
+        self.log(
+            f"公司并发 {n}，每家下载线程 {self.workers}，"
+            f"全局同时下载不超过 {self.download_slots}（代理池共享，403 换线）"
+        )
 
         def _one(pair: tuple[int, str]) -> None:
             seq, name = pair
@@ -284,6 +300,34 @@ class Crawler:
             return dest.exists() and dest.stat().st_size > 1000
         except OSError:
             return False
+
+    def _blank_disk_stats(self) -> dict[str, int]:
+        return {"ok": 0, "fail": 0, "locked": 0, "missing": 0, "need": 0}
+
+    def _stats_by_issuer(self) -> dict[str, dict[str, dict[str, int]]]:
+        out: dict[str, dict[str, dict[str, int]]] = {}
+        with self._jsonl_lock:
+            rows = list(self._index.values())
+        for row in rows:
+            name = str(row.get("issuer_name") or "")
+            src = str(row.get("source") or "")
+            if not name or src not in {"chinamoney", "chinabond"}:
+                continue
+            if not _row_relevant(name, row):
+                continue
+            st = out.setdefault(name, {}).setdefault(src, self._blank_disk_stats())
+            status = row.get("status")
+            if status == "locked":
+                st["locked"] += 1
+            elif status in {"fail", "not_pdf"}:
+                st["fail"] += 1
+            elif status == "ok":
+                if self._file_exists(row):
+                    st["ok"] += 1
+                else:
+                    st["missing"] += 1
+            st["need"] = int(st["fail"] + st["missing"] > 0)
+        return out
 
     def _source_disk_stats(self, name: str, source: str) -> dict[str, int]:
         ok = fail = locked = missing = 0
@@ -761,7 +805,11 @@ class Crawler:
                 )
                 return "ok"
             client = self.cm if source == "chinamoney" else self.cb
-            data, remote_name = client.download(item)
+            self._dl_gate.acquire()
+            try:
+                data, remote_name = client.download(item)
+            finally:
+                self._dl_gate.release()
             ext = guess_ext(item.get("suffix") or Path(str(remote_name)).suffix, data)
             if dest.suffix.lower() != f".{ext}":
                 dest = dest.with_suffix(f".{ext}")

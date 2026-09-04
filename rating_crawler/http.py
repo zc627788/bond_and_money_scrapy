@@ -16,8 +16,9 @@ UA = (
     "Chrome/131.0.0.0 Safari/537.36"
 )
 IMPERSONATE = "chrome131"
-DOWNLOAD_TIMEOUT = 90
-DOWNLOAD_PROXY_TRIES = 5
+DOWNLOAD_TIMEOUT = 180
+DOWNLOAD_CONNECT_TIMEOUT = 12
+DOWNLOAD_PROXY_TRIES = 40
 DOWNLOAD_DIRECT_TRIES = 1
 
 
@@ -98,15 +99,59 @@ class BrowserSession:
         )
         total_tries = len(kinds)
         on_attempt = kwargs.pop("on_attempt", None)
+        stream = budget == "download"
         for attempt, kind in enumerate(kinds, 1):
             use_proxy = kind == "proxy" and bool(self.proxy_pool)
-            proxy = self.proxy_pool.acquire() if use_proxy else None
+            proxy = None
+            if use_proxy:
+                proxy = self.proxy_pool.acquire()
+                if not proxy:
+                    nxt = kinds[attempt] if attempt < total_tries else ""
+                    wait_s = max(2.0, min(15.0, float(self.proxy_pool.retry_wait())))
+                    info = {
+                        "event": "retry",
+                        "kind": kind,
+                        "attempt": attempt,
+                        "total": total_tries,
+                        "proxy": "",
+                        "next_kind": nxt,
+                        "status": "retry",
+                        "reason": "暂无可用线路",
+                        "label": format_attempt(
+                            event="retry",
+                            kind=kind,
+                            attempt=attempt,
+                            total=total_tries,
+                            proxy="",
+                            reason="暂无可用线路",
+                            next_kind=nxt,
+                        ),
+                    }
+                    self._notify(info)
+                    if on_attempt:
+                        try:
+                            on_attempt(info)
+                        except Exception:
+                            pass
+                    time.sleep(wait_s)
+                    continue
             proxy_url = ProxyPool.as_url(proxy) if use_proxy else None
             nxt = kinds[attempt] if attempt < total_tries else ""
             bad_lease = False
-            timeout_s = float(timeout)
-            if use_proxy and self.proxy_pool and proxy:
+            timeout_s = _download_timeout(timeout, self.proxy_pool, proxy) if budget == "download" else float(timeout)
+            if budget != "download" and use_proxy and self.proxy_pool and proxy:
                 timeout_s = float(self.proxy_pool.timeout_for(proxy, budget))
+            if warmup is not None and not self.is_warm():
+                try:
+                    warmup(self)
+                except Exception:
+                    pass
+                if budget == "download" and not self.is_warm():
+                    bad_lease = True
+                    if self.proxy_pool and proxy:
+                        self.proxy_pool.report_bad(proxy)
+                    self._rebuild()
+                    continue
             info = {
                 "event": "try",
                 "kind": kind,
@@ -114,7 +159,7 @@ class BrowserSession:
                 "total": total_tries,
                 "proxy": proxy or "",
                 "next_kind": nxt,
-                "timeout": timeout_s,
+                "timeout": _limit_s(timeout_s),
                 "status": "proxy" if kind == "proxy" else "direct",
                 "label": format_attempt(
                     event="try",
@@ -122,7 +167,7 @@ class BrowserSession:
                     attempt=attempt,
                     total=total_tries,
                     proxy=proxy or "",
-                    limit=timeout_s,
+                    limit=_limit_s(timeout_s),
                 ),
             }
             self._notify(info)
@@ -136,9 +181,11 @@ class BrowserSession:
                 extra.pop("proxy", None)
                 extra.pop("proxies", None)
                 extra.pop("on_attempt", None)
+                extra.pop("stream", None)
                 if proxy_url:
                     extra["proxy"] = proxy_url
                 t0 = time.perf_counter()
+                extra["stream"] = stream
                 resp = self._session().request(
                     method,
                     url,
@@ -146,6 +193,14 @@ class BrowserSession:
                     timeout=timeout_s,
                     **extra,
                 )
+                if stream:
+                    if resp.status_code == 403:
+                        try:
+                            resp.close()
+                        except Exception:
+                            pass
+                    else:
+                        resp.content = _read_stream(resp)
                 elapsed = time.perf_counter() - t0
                 last_resp = resp
                 if resp.status_code == 403:
@@ -175,14 +230,9 @@ class BrowserSession:
                             on_attempt(info)
                         except Exception:
                             pass
-                    if attempt == total_tries:
+                    if not retry_403 or attempt == total_tries:
                         return resp
                     self._rebuild()
-                    if warmup is not None:
-                        try:
-                            warmup(self)
-                        except Exception:
-                            pass
                     continue
                 if _looks_like_login(resp):
                     info = {
@@ -245,19 +295,12 @@ class BrowserSession:
                         if attempt == total_tries:
                             return resp
                         self._rebuild()
-                        if warmup is not None:
-                            try:
-                                warmup(self)
-                            except Exception:
-                                pass
                         continue
                     if not retry_403 and resp.status_code in (403, 412):
                         return resp
                     if attempt == total_tries:
                         return resp
                     self._rebuild()
-                    if warmup is not None:
-                        warmup(self)
                     continue
                 if self.proxy_pool:
                     self.proxy_pool.observe_ok(proxy if use_proxy else None, elapsed, budget)
@@ -294,11 +337,6 @@ class BrowserSession:
                 if retry_timeouts_only and not _timeout_like(e):
                     raise
                 self._rebuild()
-                if warmup is not None:
-                    try:
-                        warmup(self)
-                    except Exception:
-                        pass
                 if attempt == total_tries:
                     break
             finally:
@@ -320,12 +358,47 @@ class BrowserSession:
         return self.request("POST", url, **kwargs)
 
     def get_file(self, url: str, **kwargs: Any) -> creq.Response:
+        has_pool = bool(self.proxy_pool)
         kwargs.setdefault("timeout", DOWNLOAD_TIMEOUT)
-        kwargs.setdefault("proxy_tries", DOWNLOAD_PROXY_TRIES)
-        kwargs.setdefault("direct_tries", DOWNLOAD_DIRECT_TRIES)
+        kwargs.setdefault("proxy_tries", DOWNLOAD_PROXY_TRIES if has_pool else 0)
+        kwargs.setdefault("direct_tries", 0 if has_pool else DOWNLOAD_DIRECT_TRIES)
         kwargs.setdefault("retry_timeouts_only", True)
         kwargs.setdefault("budget", "download")
+        kwargs.setdefault("retry_403", True)
         return self.get(url, **kwargs)
+
+
+def _read_stream(resp: creq.Response) -> bytes:
+    chunks: list[bytes] = []
+    if resp.content:
+        chunks.append(resp.content)
+    for chunk in resp.iter_content():
+        if chunk:
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _limit_s(timeout: Any) -> float:
+    if isinstance(timeout, tuple) and timeout:
+        return float(timeout[-1])
+    try:
+        return float(timeout or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _download_timeout(
+    base: Any,
+    pool: Optional[ProxyPool],
+    proxy: Optional[str],
+) -> tuple[float, float]:
+    if isinstance(base, tuple) and len(base) == 2:
+        connect_s, read_s = float(base[0]), float(base[1])
+    else:
+        connect_s, read_s = float(DOWNLOAD_CONNECT_TIMEOUT), float(base or DOWNLOAD_TIMEOUT)
+    if pool and proxy:
+        read_s = float(pool.timeout_for(proxy, "download"))
+    return (connect_s, read_s)
 
 
 def _attempt_kinds(*, has_pool: bool, proxy_tries: int, direct_tries: int) -> list[str]:

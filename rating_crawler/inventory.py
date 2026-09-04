@@ -130,12 +130,32 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
-    rows = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
+    rows: list[dict[str, Any]] = []
+    dec = json.JSONDecoder()
+    with path.open("r", encoding="utf-8-sig") as f:
+        for i, raw in enumerate(f, 1):
+            s = raw.strip()
+            if not s:
+                continue
+            idx = 0
+            n = len(s)
+            parsed = False
+            while idx < n:
+                while idx < n and s[idx].isspace():
+                    idx += 1
+                if idx >= n:
+                    break
+                try:
+                    obj, end = dec.raw_decode(s, idx)
+                except json.JSONDecodeError as e:
+                    print(f"  [records] 跳过损坏行 {i}: {e}", flush=True)
+                    break
+                parsed = True
+                if isinstance(obj, dict):
+                    rows.append(obj)
+                idx = max(end, idx + 1)
+            if not parsed:
+                continue
     return rows
 
 

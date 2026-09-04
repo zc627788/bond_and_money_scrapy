@@ -54,25 +54,76 @@ class ProxyPool:
         self._local = threading.local()
         self._proxies: list[str] = []
         self._bad: set[str] = set()
+        self._bad_at: dict[str, float] = {}
+        self._dl_hits: dict[str, int] = {}
+        self._rest_until: dict[str, float] = {}
+        self._in_use: set[str] = set()
         self._idx = 0
         self._fetched_at = 0.0
         self._min_fetch_gap = 15.0
+        self._bad_ttl = 90.0
+        # 实测：同一 IP 大约 10 个 PDF 后 403。第 8 个主动休息，别去撞第 10 下。
+        self._dl_hits_before_rest = 8
+        self._dl_rest_s = 120.0
         # 列表是小 JSON，可以快切；PDF 动辄几 MB，不能用列表那套秒数。
         self._api = LatencyBudget(multiplier=3.0, min_s=3.0, max_s=12.0, cold_s=8.0)
-        self._dl = LatencyBudget(multiplier=4.0, min_s=20.0, max_s=90.0, cold_s=45.0)
+        self._dl = LatencyBudget(multiplier=4.0, min_s=60.0, max_s=180.0, cold_s=120.0)
 
     def acquire(self) -> Optional[str]:
         sticky = getattr(self._local, "proxy", None)
         with self._lock:
-            if sticky and sticky not in self._bad:
+            self._expire_bad_unlocked()
+            if sticky and self._blocked(sticky):
+                sticky = None
+                self._local.proxy = None
+            if sticky:
+                self._in_use.add(sticky)
                 return sticky
             self._maybe_refresh_unlocked()
-            ip = self._next_unlocked()
+            ip = self._next_unlocked(free_only=True)
             if not ip:
-                self._refresh_unlocked()
-                ip = self._next_unlocked()
-        self._local.proxy = ip
-        return ip
+                self._refresh_unlocked(force=True)
+                self._expire_bad_unlocked()
+                ip = self._next_unlocked(free_only=True)
+            if not ip:
+                ip = self._next_unlocked(free_only=False)
+            if ip:
+                self._in_use.add(ip)
+                self._local.proxy = ip
+                return ip
+            wait_s = self._retry_wait_unlocked()
+        if wait_s > 0:
+            time.sleep(min(15.0, max(1.0, wait_s)))
+            with self._lock:
+                self._refresh_unlocked(force=True)
+                self._expire_bad_unlocked()
+                ip = self._next_unlocked(free_only=True) or self._next_unlocked(free_only=False)
+                if ip:
+                    self._in_use.add(ip)
+                self._local.proxy = ip
+                return ip
+        self._local.proxy = None
+        return None
+
+    def retry_wait(self) -> float:
+        with self._lock:
+            self._expire_bad_unlocked()
+            return self._retry_wait_unlocked()
+
+    def _retry_wait_unlocked(self) -> float:
+        now = time.time()
+        waits: list[float] = []
+        if self._fetched_at:
+            waits.append(max(0.0, self._min_fetch_gap - (now - self._fetched_at)))
+        if self._bad_at:
+            waits.append(max(0.0, min(self._bad_ttl - (now - t) for t in self._bad_at.values())))
+        if self._rest_until:
+            waits.append(max(0.0, min(ts - now for ts in self._rest_until.values())))
+        return min(waits) if waits else self._min_fetch_gap
+
+    def refresh(self, *, force: bool = False) -> None:
+        with self._lock:
+            self._refresh_unlocked(force=force)
 
     def release(self, proxy: Optional[str], *, bad: bool = False) -> None:
         if bad:
@@ -82,6 +133,23 @@ class ProxyPool:
         key = proxy or "direct"
         with self._lock:
             self._budget(budget).observe(key, seconds)
+            if budget == "download" and proxy:
+                n = int(self._dl_hits.get(proxy, 0)) + 1
+                self._dl_hits[proxy] = n
+                if n >= self._dl_hits_before_rest and proxy not in self._rest_until:
+                    self._rest_until[proxy] = time.time() + self._dl_rest_s
+                    self._in_use.discard(proxy)
+                    print(
+                        f"  [proxy] 线路 {proxy.split(':')[0]} 已下 {n} 个，休息 {int(self._dl_rest_s)}s，换下一条",
+                        flush=True,
+                    )
+        if (
+            budget == "download"
+            and proxy
+            and getattr(self._local, "proxy", None) == proxy
+            and proxy in self._rest_until
+        ):
+            self._local.proxy = None
 
     def timeout_for(self, proxy: Optional[str], budget: str = "api") -> float:
         key = proxy or "direct"
@@ -101,14 +169,24 @@ class ProxyPool:
             return
         with self._lock:
             self._bad.add(proxy)
-            alive = [p for p in self._proxies if p not in self._bad]
+            self._bad_at[proxy] = time.time()
+            self._dl_hits.pop(proxy, None)
+            self._rest_until.pop(proxy, None)
+            self._in_use.discard(proxy)
+            self._expire_bad_unlocked()
+            alive = [p for p in self._proxies if not self._blocked(p)]
             if len(alive) <= 2:
-                self._refresh_unlocked()
+                self._refresh_unlocked(force=True)
         if getattr(self._local, "proxy", None) == proxy:
             self._local.proxy = None
 
-    def _next_unlocked(self) -> Optional[str]:
-        alive = [p for p in self._proxies if p not in self._bad]
+    def _blocked(self, ip: str) -> bool:
+        return ip in self._bad or ip in self._rest_until
+
+    def _next_unlocked(self, free_only: bool = False) -> Optional[str]:
+        alive = [p for p in self._proxies if not self._blocked(p)]
+        if free_only:
+            alive = [p for p in alive if p not in self._in_use]
         if not alive:
             return None
         self._idx = self._idx % len(alive)
@@ -123,19 +201,40 @@ class ProxyPool:
         if self._fetched_at and time.time() - self._fetched_at >= self.refresh_seconds:
             self._refresh_unlocked()
 
-    def _refresh_unlocked(self) -> None:
-        if self._fetched_at and time.time() - self._fetched_at < self._min_fetch_gap:
+    def _expire_bad_unlocked(self) -> None:
+        now = time.time()
+        for ip, ts in list(self._bad_at.items()):
+            if now - ts >= self._bad_ttl:
+                self._bad.discard(ip)
+                self._bad_at.pop(ip, None)
+        for ip, ts in list(self._rest_until.items()):
+            if now >= ts:
+                self._rest_until.pop(ip, None)
+                self._dl_hits[ip] = 0
+
+    def _refresh_unlocked(self, force: bool = False) -> None:
+        gap = self._min_fetch_gap
+        if self._fetched_at and time.time() - self._fetched_at < gap:
             return
         found = self._fetch()
+        self._fetched_at = time.time()
         if not found:
             return
-        keep_bad = {ip for ip in self._bad if ip in found}
-        self._proxies = found
-        self._bad = keep_bad
+        self._expire_bad_unlocked()
+        merged: list[str] = []
+        seen: set[str] = set()
+        for ip in found + self._proxies:
+            if ip in seen:
+                continue
+            seen.add(ip)
+            merged.append(ip)
+            if len(merged) >= 80:
+                break
+        self._proxies = merged
         self._idx = 0
-        self._fetched_at = time.time()
+        alive = len([p for p in self._proxies if not self._blocked(p)])
         print(
-            f"  [proxy] 提取 {len(found)} 条（上限 {self.max_extract}，拉黑 {len(self._bad)}）",
+            f"  [proxy] 提取 {len(found)} 条（池 {len(self._proxies)}，可用 {alive}，拉黑 {len(self._bad)}，休息 {len(self._rest_until)}）",
             flush=True,
         )
 

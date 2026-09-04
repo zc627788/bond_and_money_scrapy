@@ -48,9 +48,44 @@ def today_str() -> str:
     return date.today().isoformat()
 
 
+def _data_score(root: Path) -> int:
+    """Prefer a folder that already has crawl records / PDFs."""
+    score = 0
+    rec = root / "output" / "records.jsonl"
+    try:
+        if rec.is_file():
+            score += min(int(rec.stat().st_size), 50_000_000)
+    except OSError:
+        pass
+    dl = root / "downloads"
+    try:
+        if dl.is_dir() and next(dl.iterdir(), None) is not None:
+            score += 10_000_000
+    except OSError:
+        pass
+    return score
+
+
 def app_root() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        exe_dir = Path(sys.executable).resolve().parent
+        seen: set[Path] = set()
+        cands: list[Path] = []
+        for raw in (exe_dir, Path.cwd(), exe_dir.parent):
+            try:
+                p = raw.resolve()
+            except OSError:
+                continue
+            if p in seen or not p.is_dir():
+                continue
+            seen.add(p)
+            cands.append(p)
+        if not cands:
+            return exe_dir
+        best = max(cands, key=_data_score)
+        if _data_score(best) >= _data_score(exe_dir):
+            return best
+        return exe_dir
     return Path(__file__).resolve().parent.parent
 
 
