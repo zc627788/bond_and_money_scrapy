@@ -1,0 +1,11 @@
+{
+  "mode": "offline synthetic fixture",
+  "checks": [
+    "4-sheet Excel export",
+    "Cross-source duplicate detected",
+    "Checkpoint restored"
+  ],
+  "record_count": 4,
+  "duplicate_count": 1,
+  "live_collection_tested": false
+}

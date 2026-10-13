@@ -1,105 +1,72 @@
-# 城投评级报告爬虫（中国货币网 + 中国债券信息网）
+# Financial Report Collection & Excel Delivery
 
-按发行人全称，从银行间市场两个披露平台抓取信用评级报告 PDF，并汇总成文件清单。
+**Turn a list of issuers into an organized collection of credit-rating reports, with a traceable Excel inventory.**
 
-两个平台各管一摊，类似沪深交易所：
+This Python project collects rating disclosures from ChinaMoney and ChinaBond. It demonstrates the complete delivery workflow: issuer input, source-specific requests, PDF downloads, checkpoint recovery, duplicate detection, and business-friendly exports.
 
-| 平台 | 网址 | 典型券种 |
-|---|---|---|
-| 中国货币网 chinamoney | https://www.chinamoney.com.cn/chinese/pjgg/ | 短融、中票、金融债等（交易商协会 / 外汇交易中心） |
-| 中国债券信息网 chinabond | https://www.chinabond.com.cn/xxpl/ywzc_fxyfxdh/fxyfxdh_zqzl/ | 企业债等（中央结算公司） |
+## What a client receives
 
-名单默认用仓库根目录的 `A09_lgfv_issuer_name_only.xlsx`（`issuer_name_clean` 列，4152 家城投）。
+| Input / need | Delivered result |
+| --- | --- |
+| An issuer name or a CSV/Excel issuer list | Searches across the two supported disclosure sources |
+| Reports scattered across websites | PDFs organized by source and issuer |
+| Repeated or interrupted collection | Saved issuer/task/page progress and resumable runs |
+| Duplicate PDFs | SHA-256 duplicate flags and links to the first matching record |
+| A usable handover | Excel workbook, CSV inventories, source links, status and error details |
 
-## 协议方案（无浏览器）
+The repository also includes a Tkinter desktop interface with list import, progress display, pause/resume controls, and Windows executable packaging.
 
-最终运行不依赖 Playwright / Camoufox。TLS 用 `curl_cffi` 模拟 Chrome。
+## Portfolio demonstration
 
-### 中国货币网
+![Offline export demonstration](docs/portfolio/demo.png)
 
-1. `GET /chinese/pjgg/` 拿负载均衡 Cookie `AlteonP10`
-2. `POST /dqs/rest/cm-u-rbt/apply`，`key` 为页面 JS 里 `bbb` 的倒序（静态，不是动态签名）
-3. `POST /ags/ms/cm-u-notice-issue/ratingAnNotice` 查债项 / 主体 / 重点关注
-4. `GET /dqs/cm-s-notice-query/fileDownLoad.do?contentId=...&priority=0&mode=save` 下 PDF
-
-站点前置有电信 CDN。`pageSize` 过大或连打会空 body 的 **403**，客户端会重建会话并退避重试。
-
-### 中国债券信息网
-
-1. `GET /xxpl/ywzc_fxyfxdh/fxyfxdh_zqzl/`
-2. `POST /cbiw/trs/getContentByConditions`（JSON，栏目 `评级文件`）
-3. 附件地址 = 详情页目录 + `appendixIds` 里的 `P0....pdf`
-
-`common.js` 里有 AES-ECB（`rklnavQccKhKkyVV`），只用于登录态，公开信披列表不签名。
-
-## 桌面版（GitHub Release 的 exe）
+The demonstration uses **synthetic records**, runs the existing duplicate-detection and workbook-export modules, and checks checkpoint persistence. It makes no requests to either disclosure website. It is evidence of the local processing path, not a live collection benchmark.
 
 ```powershell
-python -u gui_app.py
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe scripts/portfolio_demo.py
 ```
 
-界面：下载模板 / 导入 CSV（写入名单框，与手填并集去重）、textarea 里改名单、同时抓几家 / 同时下载几个（上限 50）、代理（默认已填，留空直连）、开始 / 暂停 / 继续。下方按公司显示 `12/31 39%` 和当前文件。默认双源查全部（1990 至今）。断点仍走 `output/progress.json`。
+Open `docs/portfolio/demo.html` to inspect the generated report. Generated sample exports are stored under `docs/portfolio/sample-output/`.
 
-打 Windows 安装包：
+## Run the collector
+
+Python 3.10+ is recommended. Review `config/settings.json` before a live run, especially request rates, worker counts, output paths and optional proxy settings. Do not publish credentials in configuration files.
 
 ```powershell
-powershell -File scripts/build_exe.ps1
+# Inspect the available options.
+python main.py --help
+
+# Start with one issuer, one source and a small listing-only check.
+python main.py --issuer "FULL LEGAL ISSUER NAME" --source chinamoney --max-pages 1 --no-download --no-proxy
+
+# Process a limited batch from a spreadsheet.
+python main.py --excel issuers.xlsx --start 1 --limit 5 --max-pages 1 --no-proxy
+
+# Open the desktop interface.
+python gui_app.py
 ```
 
-GitHub 上 **Publish a release** 会自动编译 `BondMoneyScrapy.exe` 挂到该 Release 供下载。本地也可在 Actions 里手动跑 `Release Windows exe`。
+Excel input uses the `issuer_name_clean` column. Resume is enabled by default; `--no-resume` changes that behavior. Source scope can be `chinamoney`, `chinabond`, or `both`.
 
-## 安装
+## Output and implementation
 
-```powershell
-python -m pip install -r requirements.txt
-```
+- `downloads/`: downloaded documents grouped by source and issuer.
+- `output/评级报告清单.xlsx`: workbook containing source sheets, combined inventory and summary.
+- `output/inventory.csv`, `chinamoney.csv`, `chinabond.csv`, `summary.csv`: CSV equivalents; current column labels are Chinese.
+- `output/records.jsonl` and `progress.json`: processing records and resumable state.
+- `rating_crawler/chinamoney.py` and `chinabond.py`: source adapters.
+- `rating_crawler/http.py`: request/download error handling.
+- `rating_crawler/inventory.py`: exports and duplicate detection.
+- `rating_crawler/progress.py`: checkpoint persistence.
 
-## 用法
+Stack: Python, curl_cffi, pandas, openpyxl and Tkinter. Windows packaging is available through `scripts/build_exe.ps1`.
 
-单个企业（`-u` 避免 Windows 下日志缓冲）：
+## Scope and limitations
 
-```powershell
-python -u main.py --issuer 临泉县交通建设投资有限责任公司
-```
+This implementation targets two specific sources; adapting it to another site is a separate task. Source changes, access restrictions and network conditions can affect collection. Protected documents are recorded as unavailable rather than represented as downloaded. No fixed throughput, historical coverage or unattended uptime is claimed here. The current desktop UI and business exports are primarily Chinese; English localization can be scoped separately.
 
-从 Excel 分批：
+For a similar project, define the source URLs, required fields, volume, refresh frequency, access permissions and preferred output format first. A small acceptance sample should precede a full run.
 
-```powershell
-python -u main.py --excel A09_lgfv_issuer_name_only.xlsx --start 1 --limit 50
-```
-
-断点在 `output/progress.json`：记录每家、每个栏目的接口总数、当前页、已列出/已下载条数。默认续跑。
-
-```powershell
-python -u main.py --excel A09_lgfv_issuer_name_only.xlsx
-```
-
-关掉代理或加大下载并发：
-
-```powershell
-python -u main.py --issuer 临泉县交通建设投资有限责任公司 --no-proxy --workers 8
-```
-
-## 产出
-
-```
-downloads/
-  chinamoney/<发行人>/<日期>_<评级公司>_<标题>_<id>.pdf
-  chinabond/<发行人>/...
-output/
-  inventory.xlsx   # 总清单
-  inventory.csv
-  records.jsonl    # 逐条落盘，中断不丢
-  summary.csv
-  state.json       # 已完成发行人
-```
-
-同一份 PDF 在两边都会出现时，`inventory.xlsx` 的 `duplicate_of` 按 sha256 标记。
-
-## 速度与代理
-
-默认 `delay_seconds=0`，下载并发 `workers=12`。动态代理从 58ip 提取，**单次最多 50 条**，失效轮换，池空再提。日期窗口为 `1990-01-01` 至今（接口能接受的最早），一次查全量，不再拆 3 年窗口。
-
-需要登录的中债非公开稿只记 `locked`，不下载、不重试。
-
-重复：`is_duplicate=1`，`dup_reason` 为 `same_file`（sha256）或 `same_title_date`，`duplicate_of` 指向先出现的 content_id。两边文件都保留。
+[Original Chinese technical notes](docs/legacy-readme.zh-CN.md) are retained for context; the current code and this README take precedence where older paths or output names differ.
