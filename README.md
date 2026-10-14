@@ -1,88 +1,92 @@
-# Financial Report Collection & Excel Delivery
+# Rating report collector
 
-**Turn a list of issuers into an organized collection of credit-rating reports, with a traceable Excel inventory.**
+[中文说明](README.zh-CN.md)
 
-This Python project collects rating disclosures from ChinaMoney and ChinaBond. It demonstrates the complete delivery workflow: issuer input, source-specific requests, PDF downloads, checkpoint recovery, duplicate detection, and business-friendly exports.
+I built this tool to avoid downloading rating reports one by one and maintaining the file list by hand. Give it an issuer name or a spreadsheet of issuers; it collects matching disclosures, saves PDFs and builds an Excel inventory with source links and download status.
 
-## What a client receives
+There are adapters for ChinaBond and ChinaMoney, a command-line runner, and a Tkinter desktop interface.
 
-| Input / need | Delivered result |
+## A real collection run
+
+![Report generated from downloaded PDFs and the collection manifest](docs/portfolio/live-evidence/screenshot.png)
+
+On 14 October 2026, I ran the original collector against **ChinaBond**, using **中国长江三峡集团有限公司** as the issuer. This was a small run: the first listing page, one download worker and a direct connection.
+
+| Output | Measured result |
 | --- | --- |
-| An issuer name or a CSV/Excel issuer list | Searches across the two supported disclosure sources |
-| Reports scattered across websites | PDFs organized by source and issuer |
-| Repeated or interrupted collection | Saved issuer/task/page progress and resumable runs |
-| Duplicate PDFs | SHA-256 duplicate flags and links to the first matching record |
-| A usable handover | Excel workbook, CSV inventories, source links, status and error details |
+| Report entries returned | 15 |
+| PDFs downloaded and parsed | 15 |
+| Unique PDFs, checked by SHA-256 | 10 |
+| Duplicate copies | 5 |
+| Pages across the 10 unique PDFs | 182 |
 
-The repository also includes a Tkinter desktop interface with list import, progress display, pause/resume controls, and Windows executable packaging.
+The duplicates matter: 15 downloaded files do not mean 15 different reports. The inventory keeps the entries traceable and marks files with matching hashes.
 
-## Live collection verified — 14 October 2026
+The screenshot is a report built from that run. The [15-row manifest](docs/portfolio/live-evidence/manifest.csv) includes source URLs, PDF URLs and hashes, and the [verification file](docs/portfolio/live-evidence/verification.json) records the totals. Source PDFs are not redistributed here.
 
-![Live collection evidence](docs/portfolio/live-evidence/screenshot.png)
+A separate ChinaMoney check returned no matching records for this issuer. The numbers above are ChinaBond results only, and do not represent the issuer's complete reporting history.
 
-A bounded run of the original collector queried **ChinaBond for China Three Gorges Corporation**, retrieved **15 report entries**, and downloaded **15 PDF files**. Independent PDF parsing and SHA-256 verification found **10 unique files**, **5 duplicate copies**, and **182 pages across the unique files**. The run used one issuer, the first listing page and one download worker. These are measured sample results, not a claim of full historical coverage or sustained throughput.
+## What the tool produces
 
-Inspect the [15-row manifest with source links, PDF links and hashes](docs/portfolio/live-evidence/manifest.csv), [verification totals](docs/portfolio/live-evidence/verification.json), and [Chinese evidence report](docs/portfolio/live-evidence/report.html). Source PDFs are not redistributed in this repository.
+- PDFs grouped by source and issuer.
+- An Excel workbook with source sheets, a combined inventory and a summary.
+- CSV inventories for further processing.
+- Download status, source links, duplicate flags and error details.
+- Saved task/page progress so interrupted work can resume.
 
-Reproduce the collection with the credential-free [sample configuration](docs/portfolio/live-evidence/settings.json):
+The desktop interface supports list import, progress display and pause/resume controls. Business column names and the current interface are primarily Chinese.
 
-```powershell
-python main.py --issuer "中国长江三峡集团有限公司" --source chinabond --max-pages 1 --no-proxy --config docs/portfolio/live-evidence/settings.json
-```
+## Run a small collection
 
-The same issuer did not yield matching records in the separate ChinaMoney check; the numbers above refer **only to ChinaBond**. Site availability can change.
-
-## Offline portfolio demonstration
-
-![Offline export demonstration](docs/portfolio/demo.png)
-
-The demonstration uses **synthetic records**, runs the existing duplicate-detection and workbook-export modules, and checks checkpoint persistence. It makes no requests to either disclosure website. It is evidence of the local processing path, not a live collection benchmark.
+Use Python 3.10 or later.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe scripts/portfolio_demo.py
+.\.venv\Scripts\python.exe main.py --issuer "中国长江三峡集团有限公司" --source chinabond --max-pages 1 --no-proxy --config docs/portfolio/live-evidence/settings.json
 ```
 
-Open `docs/portfolio/demo.html` to inspect the generated report. Generated sample exports are stored under `docs/portfolio/sample-output/`.
+The checked-in sample configuration contains no credentials. Before a larger run, review output paths, worker counts and request rates in your configuration.
 
-## Run the collector
-
-Python 3.10+ is recommended. Review `config/settings.json` before a live run, especially request rates, worker counts, output paths and optional proxy settings. Do not publish credentials in configuration files.
+Other entry points, after activating the environment:
 
 ```powershell
-# Inspect the available options.
+.\.venv\Scripts\Activate.ps1
 python main.py --help
-
-# Start with one issuer, one source and a small listing-only check.
-python main.py --issuer "FULL LEGAL ISSUER NAME" --source chinamoney --max-pages 1 --no-download --no-proxy
-
-# Process a limited batch from a spreadsheet.
 python main.py --excel issuers.xlsx --start 1 --limit 5 --max-pages 1 --no-proxy
-
-# Open the desktop interface.
 python gui_app.py
 ```
 
-Excel input uses the `issuer_name_clean` column. Resume is enabled by default; `--no-resume` changes that behavior. Source scope can be `chinamoney`, `chinabond`, or `both`.
+Excel input uses an `issuer_name_clean` column. Sources can be `chinamoney`, `chinabond` or `both`. Resume is enabled by default; use `--no-resume` when you deliberately want to change that.
 
-## Output and implementation
+For a network-free example:
 
-- `downloads/`: downloaded documents grouped by source and issuer.
-- `output/评级报告清单.xlsx`: workbook containing source sheets, combined inventory and summary.
-- `output/inventory.csv`, `chinamoney.csv`, `chinabond.csv`, `summary.csv`: CSV equivalents; current column labels are Chinese.
-- `output/records.jsonl` and `progress.json`: processing records and resumable state.
-- `rating_crawler/chinamoney.py` and `chinabond.py`: source adapters.
-- `rating_crawler/http.py`: request/download error handling.
-- `rating_crawler/inventory.py`: exports and duplicate detection.
-- `rating_crawler/progress.py`: checkpoint persistence.
+```powershell
+python scripts/portfolio_demo.py
+```
 
-Stack: Python, curl_cffi, pandas, openpyxl and Tkinter. Windows packaging is available through `scripts/build_exe.ps1`.
+That example uses **synthetic records** to check duplicate detection, workbook export and checkpoints. Its report is `docs/portfolio/demo.html`; the real collection evidence above is separate.
 
-## Scope and limitations
+## Files and code
 
-This implementation targets two specific sources; adapting it to another site is a separate task. Source changes, access restrictions and network conditions can affect collection. Protected documents are recorded as unavailable rather than represented as downloaded. No fixed throughput, historical coverage or unattended uptime is claimed here. The current desktop UI and business exports are primarily Chinese; English localization can be scoped separately.
+| Path | Purpose |
+| --- | --- |
+| `downloads/` | Downloaded PDFs |
+| `output/评级报告清单.xlsx` | Excel inventory |
+| `output/inventory.csv` | Combined CSV inventory |
+| `output/records.jsonl`, `progress.json` | Records and resumable state |
+| `rating_crawler/chinamoney.py`, `chinabond.py` | Source adapters |
+| `rating_crawler/http.py` | Requests and downloads |
+| `rating_crawler/inventory.py` | Export and duplicate detection |
+| `rating_crawler/progress.py` | Checkpoints |
+| `scripts/build_exe.ps1` | Windows executable packaging |
 
-For a similar project, define the source URLs, required fields, volume, refresh frequency, access permissions and preferred output format first. A small acceptance sample should precede a full run.
+Stack: Python, curl_cffi, pandas, openpyxl and Tkinter.
 
-[Original Chinese technical notes](docs/legacy-readme.zh-CN.md) are retained for context; the current code and this README take precedence where older paths or output names differ.
+## Adapting it to another request
+
+For a similar job, I would first confirm the issuer list, date range, sites and required spreadsheet columns, then check a small batch together. Scheduled updates or another source need their own implementation and verification.
+
+These adapters are site-specific. A changed page or unavailable document can cause an error, which belongs in the inventory rather than being counted as a successful download.
+
+[Original Chinese technical notes](docs/legacy-readme.zh-CN.md)
