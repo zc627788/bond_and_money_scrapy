@@ -1,0 +1,12 @@
+{
+  "run_date": "2026-10-14",
+  "issuer": "中国长江三峡集团有限公司",
+  "source": "中国债券信息网",
+  "records": 15,
+  "parsed_pdfs": 15,
+  "unique_pdfs": 10,
+  "duplicates": 5,
+  "unique_pdf_pages": 182,
+  "total_bytes": 30012147,
+  "scope": "One issuer; first listing page; direct connection; one download worker. No production throughput claim."
+}

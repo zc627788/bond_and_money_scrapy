@@ -16,7 +16,23 @@ This Python project collects rating disclosures from ChinaMoney and ChinaBond. I
 
 The repository also includes a Tkinter desktop interface with list import, progress display, pause/resume controls, and Windows executable packaging.
 
-## Portfolio demonstration
+## Live collection verified — 14 October 2026
+
+![Live collection evidence](docs/portfolio/live-evidence/screenshot.png)
+
+A bounded run of the original collector queried **ChinaBond for China Three Gorges Corporation**, retrieved **15 report entries**, and downloaded **15 PDF files**. Independent PDF parsing and SHA-256 verification found **10 unique files**, **5 duplicate copies**, and **182 pages across the unique files**. The run used one issuer, the first listing page and one download worker. These are measured sample results, not a claim of full historical coverage or sustained throughput.
+
+Inspect the [15-row manifest with source links, PDF links and hashes](docs/portfolio/live-evidence/manifest.csv), [verification totals](docs/portfolio/live-evidence/verification.json), and [Chinese evidence report](docs/portfolio/live-evidence/report.html). Source PDFs are not redistributed in this repository.
+
+Reproduce the collection with the credential-free [sample configuration](docs/portfolio/live-evidence/settings.json):
+
+```powershell
+python main.py --issuer "中国长江三峡集团有限公司" --source chinabond --max-pages 1 --no-proxy --config docs/portfolio/live-evidence/settings.json
+```
+
+The same issuer did not yield matching records in the separate ChinaMoney check; the numbers above refer **only to ChinaBond**. Site availability can change.
+
+## Offline portfolio demonstration
 
 ![Offline export demonstration](docs/portfolio/demo.png)
 
